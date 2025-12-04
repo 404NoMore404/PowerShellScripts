@@ -120,7 +120,7 @@ function Compare-DeviceList {
 
 function Start-DeviceComparisonMenu {
 
-    Connectto-MGGraph
+    #Change this to your msgraph connection function from above.
 
     do {
         Clear-Host
