@@ -189,7 +189,6 @@ $rows = $devices |
         }
     }
 Write-Table -Rows $rows
-
 # =============================
 # 7. Devices by Windows Release & Build
 # =============================
@@ -200,18 +199,28 @@ function Get-WinRelease {
     param([string]$Build)
 
     switch -Regex ($Build) {
-        "^10\.0\.26200"   { return "Windows 11 25H2" }  # 25H2 builds
-        "^10\.0\.26100"   { return "Windows 11 24H2" }  # 24H2 builds
-        "^10\.0\.25252"   { return "Windows 11 24H2" }  # older 24H2 builds
-        "^10\.0\.22963"   { return "Windows 11 23H2" }
-        "^10\.0\.2262[13]" { return "Windows 11 22H2" }
-        "^10\.0\.19045"   { return "Windows 10 22H2" }
-        "^10\.0\.19044"   { return "Windows 10 21H2" }
-        default           { return "Unknown" }
+        "^10\.0\.26200"       { return "Windows 11 25H2" }
+        "^10\.0\.26100"       { return "Windows 11 24H2" }
+        "^10\.0\.25252"       { return "Windows 11 24H2" }  # older 24H2 builds
+        "^10\.0\.22963"       { return "Windows 11 23H2" }
+        "^10\.0\.2263[0-9]"   { return "Windows 11 22H2" }  # 22631.* builds
+        "^10\.0\.19045"       { return "Windows 10 22H2" }
+        "^10\.0\.19044"       { return "Windows 10 21H2" }
+        default               { return "Unknown" }
     }
 }
 
 # Group devices by release, then by build
+$releaseOrder = @(
+    "Windows 11 25H2",
+    "Windows 11 24H2",
+    "Windows 11 23H2",
+    "Windows 11 22H2",
+    "Windows 10 22H2",
+    "Windows 10 21H2",
+    "Unknown"
+)
+
 $releaseGroups = $devices |
     ForEach-Object {
         [PSCustomObject]@{
@@ -220,6 +229,9 @@ $releaseGroups = $devices |
         }
     } |
     Group-Object -Property Release
+
+# Sort releases based on desired order
+$releaseGroups = $releaseGroups | Sort-Object { $releaseOrder.IndexOf($_.Name) }
 
 foreach ($release in $releaseGroups) {
     Write-Host "`n$($release.Name)" -ForegroundColor Yellow
