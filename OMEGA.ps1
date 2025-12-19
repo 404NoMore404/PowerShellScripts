@@ -528,187 +528,192 @@ function IntuneDevices {
              }
             4 {
                 $tempFolder = "C:\Temp"
-                [int]$MaxColWidth = 45
+[int]$MaxColWidth = 45
 
-                #Functions
-                function Write-Section {
-                    param([string]$Title)
+#Functions
+function Write-Section {
+    param([string]$Title)
 
-                    Write-Host ""
-                    Write-Host ("=" * 70) -ForegroundColor DarkGray
-                    Write-Host ("  $Title") -ForegroundColor Cyan
-                    Write-Host ("=" * 70) -ForegroundColor DarkGray
-                    Write-Host ""
-                }
+    Write-Host ""
+    Write-Host ("=" * 70) -ForegroundColor DarkGray
+    Write-Host ("  $Title") -ForegroundColor Cyan
+    Write-Host ("=" * 70) -ForegroundColor DarkGray
+    Write-Host ""
+}
 
-                function Trunc {
-                    param([string]$Text, [int]$MaxLength = 45)
-                    if ([string]::IsNullOrWhiteSpace($Text)) { return "" }
-                    if ($Text.Length -le $MaxLength) { return $Text }
-                    return $Text.Substring(0, $MaxLength - 3) + "..."
-                }
+function Trunc {
+    param([string]$Text, [int]$MaxLength = 45)
+    if ([string]::IsNullOrWhiteSpace($Text)) { return "" }
+    if ($Text.Length -le $MaxLength) { return $Text }
+    return $Text.Substring(0, $MaxLength - 3) + "..."
+}
 
-                function Write-Table {
-                    param([array]$Rows)
+function Write-Table {
+    param([array]$Rows)
 
-                    if (-not $Rows -or $Rows.Count -eq 0) {
-                        Write-Host "(no data)" -ForegroundColor Yellow
-                        return
-                    }
+    if (-not $Rows -or $Rows.Count -eq 0) {
+        Write-Host "(no data)" -ForegroundColor Yellow
+        return
+    }
 
-                    $columns = $Rows[0].PSObject.Properties.Name
-                    $widths = @{}
+    $columns = $Rows[0].PSObject.Properties.Name
+    $widths = @{}
 
-                    foreach ($col in $columns) {
-                        $max = ($Rows | ForEach-Object {
-                                ($_.$col | Out-String).Trim().Length
-                            } | Measure-Object -Maximum).Maximum
+    foreach ($col in $columns) {
+        $max = ($Rows | ForEach-Object {
+                ($_.$col | Out-String).Trim().Length
+            } | Measure-Object -Maximum).Maximum
 
-                        if ($col.Length -gt $max) { $max = $col.Length }
-                        if ($max -gt $MaxColWidth) { $max = $MaxColWidth }
-                        $widths[$col] = $max
-                    }
+        if ($col.Length -gt $max) { $max = $col.Length }
+        if ($max -gt $MaxColWidth) { $max = $MaxColWidth }
+        $widths[$col] = $max
+    }
 
-                    foreach ($col in $columns) {
-                        Write-Host ($col.PadRight($widths[$col] + 2)) -NoNewline -ForegroundColor Cyan
-                    }
-                    Write-Host ""
+    foreach ($col in $columns) {
+        Write-Host ($col.PadRight($widths[$col] + 2)) -NoNewline -ForegroundColor Cyan
+    }
+    Write-Host ""
 
-                    foreach ($col in $columns) {
-                        Write-Host (("-" * $widths[$col]).PadRight($widths[$col] + 2)) -NoNewline -ForegroundColor DarkGray
-                    }
-                    Write-Host ""
+    foreach ($col in $columns) {
+        Write-Host (("-" * $widths[$col]).PadRight($widths[$col] + 2)) -NoNewline -ForegroundColor DarkGray
+    }
+    Write-Host ""
 
-                    foreach ($row in $Rows) {
-                        foreach ($col in $columns) {
-                            $value = Trunc ($row.$col) $widths[$col]
-                            Write-Host ($value.PadRight($widths[$col] + 2)) -NoNewline
-                        }
-                        Write-Host ""
-                    }
-                }
+    foreach ($row in $Rows) {
+        foreach ($col in $columns) {
+            $value = Trunc ($row.$col) $widths[$col]
+            Write-Host ($value.PadRight($widths[$col] + 2)) -NoNewline
+        }
+        Write-Host ""
+    }
+}
 
+# Export Folders
+$exportFolders = Get-ChildItem -Path $tempFolder -Directory -Filter "IntuneDeviceExport_*" |
+Sort-Object LastWriteTime -Descending
 
-                # Export Folders
-                $exportFolders = Get-ChildItem -Path $tempFolder -Directory -Filter "IntuneDeviceExport_*" |
-                Sort-Object LastWriteTime -Descending
+if (-not $exportFolders) {
+    Write-Host "No Intune export folders found." -ForegroundColor Red
+    Pause
+    return
+}
 
-                if (-not $exportFolders) {
-                    Write-Host "No Intune export folders found." -ForegroundColor Red
-                    Pause
-                    return
-                }
+Write-Host "`nSelect an Intune export folder:`n" -ForegroundColor Cyan
+$folderOptions = @()
 
-                Write-Host "`nSelect an Intune export folder:`n" -ForegroundColor Cyan
-                $folderOptions = @()
-                $recentFolders = $exportFolders[0..([Math]::Min(2, $exportFolders.Count - 1))]
+$recent = $exportFolders | Select-Object -First 3
+for ($i = 0; $i -lt $recent.Count; $i++) {
+    Write-Host "$($i + 1). $($recent[$i].Name)" -ForegroundColor Green
+    $folderOptions += $recent[$i].FullName
+}
 
-                for ($i = 0; $i -lt $recentFolders.Count; $i++) {
-                    $folderOptions += $recentFolders[$i].FullName
-                    Write-Host ("{0}. {1}" -f ($i + 1), $recentFolders[$i].Name) -ForegroundColor Green
-                }
+Write-Host "$($folderOptions.Count + 1). Manual Select (Browse Folder)" -ForegroundColor Green
+$choice = Read-Host "Enter number"
 
-                $folderOptions += "Manual Select (Browse Folder)"
-                Write-Host ("{0}. Manual Select (Browse Folder)" -f $folderOptions.Count) -ForegroundColor Green
+if ($choice -eq ($folderOptions.Count + 1)) {
+    Add-Type -AssemblyName System.Windows.Forms
+    $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
+    if ($dlg.ShowDialog() -ne "OK") { return }
+    $selectedFolder = $dlg.SelectedPath
+}
+else {
+    $selectedFolder = $folderOptions[$choice - 1]
+}
 
-                $choice = Read-Host "`nEnter number"
-                if (-not ($choice -as [int]) -or $choice -lt 1 -or $choice -gt $folderOptions.Count) {
-                    Write-Host "Invalid choice." -ForegroundColor Yellow
-                    Pause
-                    return
-                }
+Write-Host "`nSelected Folder: $selectedFolder" -ForegroundColor Cyan
 
-                if ($choice -eq $folderOptions.Count) {
-                    Add-Type -AssemblyName System.Windows.Forms
-                    $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
-                    $dialog.SelectedPath = $tempFolder
-                    if ($dialog.ShowDialog() -ne "OK") { return }
-                    $selectedFolder = $dialog.SelectedPath
-                }
-                else {
-                    $selectedFolder = $folderOptions[$choice - 1]
-                }
+$csv = Get-ChildItem $selectedFolder -Filter *.csv | Select-Object -First 1
+if (-not $csv) {
+    Write-Host "No CSV found." -ForegroundColor Red
+    return
+}
 
+$devices = Import-Csv $csv.FullName
 
-                # Import
-                $csv = Get-ChildItem $selectedFolder -Filter *.csv | Select-Object -First 1
-                if (-not $csv) {
-                    Write-Host "No CSV found in folder." -ForegroundColor Red
-                    Pause
-                    return
-                }
+$categoryCol = "Category"
+$deviceNameCol = "Device Name"      # Change if your CSV uses a different name
+$deviceSerialCol = "Device Serial"  # Change if your CSV uses a different name
+$primaryUserCol = "Primary User UPN"    # Column to filter empty users
 
-                $devices = Import-Csv $csv.FullName
+foreach ($col in @($deviceNameCol, $deviceSerialCol, $primaryUserCol)) {
+    if (-not ($devices[0].PSObject.Properties.Name -contains $col)) {
+        Write-Host "Missing required column: $col" -ForegroundColor Red
+        Pause
+        return
+    }
+}
 
+# ====== CATEGORY FILTER LOGIC ======
+$categorySelected = $null
+if ($devices[0].PSObject.Properties.Name -contains $categoryCol) {
+    $categories = $devices |
+        Where-Object { $_.$categoryCol } |
+        Select-Object -ExpandProperty $categoryCol -Unique |
+        Sort-Object
 
-                $categoryCol = "Category"
-                $deviceNameCol = "Device Name"      # Change if your CSV uses a different name
-                $deviceSerialCol = "Device Serial"  # Change if your CSV uses a different name
-                $primaryUserCol = "Primary User UPN"    # Column to filter empty users
+    if ($categories.Count -gt 1) {
+        Write-Host "`nFilter by Category?" -ForegroundColor Cyan
+        Write-Host "0. All Categories" -ForegroundColor Green
+        for ($i = 0; $i -lt $categories.Count; $i++) {
+            Write-Host ("{0}. {1}" -f ($i + 1), $categories[$i]) -ForegroundColor Green
+        }
 
-                foreach ($col in @($deviceNameCol, $deviceSerialCol, $primaryUserCol)) {
-                    if (-not ($devices[0].PSObject.Properties.Name -contains $col)) {
-                        Write-Host "Missing required column: $col" -ForegroundColor Red
-                        Pause
-                        return
-                    }
-                }
+        $catChoice = Read-Host "`nEnter number"
+        if ($catChoice -as [int] -and $catChoice -gt 0 -and $catChoice -le $categories.Count) {
+            $categorySelected = $categories[$catChoice - 1]
+            $devices = $devices | Where-Object { $_.$categoryCol -eq $categorySelected }
+        }
+        elseif ($catChoice -eq 0) {
+            $categorySelected = $null
+        }
+        else {
+            Write-Host "Invalid selection. Showing all categories." -ForegroundColor Yellow
+            $categorySelected = $null
+        }
+    }
+}
 
-                $categorySelected = $null
-                if ($devices[0].PSObject.Properties.Name -contains $categoryCol) {
-                    $categories = $devices |
-                    Where-Object { $_.$categoryCol } |
-                    Select-Object -ExpandProperty $categoryCol -Unique |
-                    Sort-Object
+# Filter devices missing Primary User
+$filteredDevices = $devices | Where-Object { -not $_.$primaryUserCol -or $_.$primaryUserCol.Trim() -eq "" }
+$totalCount = $filteredDevices.Count
 
-                    if ($categories.Count -gt 1) {
-                        Write-Host "`nFilter by Category?" -ForegroundColor Cyan
-                        Write-Host "0. All Categories" -ForegroundColor Green
-                        for ($i = 0; $i -lt $categories.Count; $i++) {
-                            Write-Host ("{0}. {1}" -f ($i + 1), $categories[$i]) -ForegroundColor Green
-                        }
+# Display results
+if ($categorySelected) {
+    Write-Section "$totalCount Devices Missing Primary User (Category: $categorySelected)"
+    Write-Table -Rows ($filteredDevices | Select-Object $deviceNameCol, $deviceSerialCol)
+}
+elseif ($categories.Count -gt 1 -and $categorySelected -eq $null) {
+    $grouped = $filteredDevices | Group-Object -Property $categoryCol
+    foreach ($grp in $grouped) {
+        Write-Section "$($grp.Count) Devices Missing Primary User (Category: $($grp.Name))"
+        Write-Table -Rows ($grp.Group | Select-Object $deviceNameCol, $deviceSerialCol)
+    }
+}
+else {
+    Write-Section "$totalCount Devices Missing Primary User"
+    Write-Table -Rows ($filteredDevices | Select-Object $deviceNameCol, $deviceSerialCol)
+}
 
-                        $catChoice = Read-Host "`nEnter number"
-                        if ($catChoice -as [int] -and $catChoice -gt 0 -and $catChoice -le $categories.Count) {
-                            $categorySelected = $categories[$catChoice - 1]
-                            $devices = $devices | Where-Object { $_.$categoryCol -eq $categorySelected }
-                        }
-                    }
-                }
+# Export logic
+Write-Host "`nExport these devices to CSV? (yes / no) [default: no]" -ForegroundColor Cyan
+$exportChoice = Read-Host "Enter choice"
 
-                $filteredDevices = $devices | Where-Object { -not $_.$primaryUserCol -or $_.$primaryUserCol.Trim() -eq "" }
+if ($exportChoice -match '^(?i)y(es)?$') {
+    $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+    if ($categorySelected) {
+        $outPath = Join-Path $selectedFolder "Devices_Missing_PrimaryUser_$categorySelected`_$timestamp.csv"
+    }
+    else {
+        $outPath = Join-Path $selectedFolder "Devices_Missing_PrimaryUser_$timestamp.csv"
+    }
+    $filteredDevices | Export-Csv $outPath -NoTypeInformation -Encoding UTF8
+    Write-Host "Exported to $outPath" -ForegroundColor Green
+}
+else {
+    Write-Host "Export skipped." -ForegroundColor DarkGray
+}
 
-                $totalCount = $filteredDevices.Count
-
-                if ($categorySelected) {
-                    Write-Section "$totalCount Devices Missing Primary User (Category: $categorySelected)"
-                    Write-Table -Rows ($filteredDevices | Select-Object $deviceNameCol, $deviceSerialCol)
-                }
-                elseif ($devices[0].PSObject.Properties.Name -contains $categoryCol) {
-                    $grouped = $filteredDevices | Group-Object -Property $categoryCol
-                    foreach ($grp in $grouped) {
-                        Write-Section "$($grp.Count) Devices Missing Primary User (Category: $($grp.Name))"
-                        Write-Table -Rows ($grp.Group | Select-Object $deviceNameCol, $deviceSerialCol)
-                    }
-                }
-                else {
-                    Write-Section "$totalCount Devices Missing Primary User"
-                    Write-Table -Rows ($filteredDevices | Select-Object $deviceNameCol, $deviceSerialCol)
-                }
-                Write-Host "`nExport these devices to CSV? (yes / no) [default: no]" -ForegroundColor Cyan
-                $exportChoice = Read-Host "Enter choice"
-
-                if ($exportChoice -match '^(?i)y(es)?$') {
-                    $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-                    $outPath = Join-Path $selectedFolder "Devices_Missing_PrimaryUser_$timestamp.csv"
-                    $filteredDevices | Export-Csv $outPath -NoTypeInformation -Encoding UTF8
-                    Write-Host "Exported to $outPath" -ForegroundColor Green
-                }
-                else {
-                    Write-Host "Export skipped." -ForegroundColor DarkGray
-                }
-
-                Pause
+Pause
 
             }
             5 { return }
