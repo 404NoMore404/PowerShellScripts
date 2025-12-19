@@ -439,6 +439,7 @@ function IntuneDevices {
                         $catChoice = Read-Host "`nEnter number"
                         if ($catChoice -as [int] -and $catChoice -gt 0 -and $catChoice -le $categories.Count) {
                             $categorySelected = $categories[$catChoice - 1]
+                            # Filter devices by selected category
                             $devices = $devices | Where-Object { $_.$categoryCol -eq $categorySelected }
                         }
                     }
@@ -453,6 +454,7 @@ function IntuneDevices {
                 $mfgChoice = Read-Host "`nEnter number"
                 if ($mfgChoice -as [int] -and $mfgChoice -gt 0 -and $mfgChoice -le $manufacturers.Count) {
                     $manufacturerSelected = $manufacturers[$mfgChoice - 1]
+                    # Filter devices by selected manufacturer (already filtered by category)
                     $devices = $devices | Where-Object { $_.$manufacturerCol -eq $manufacturerSelected }
                 }
 
@@ -463,6 +465,7 @@ function IntuneDevices {
                 for ($i = 0; $i -lt $uniqueModels.Count; $i++) { Write-Host ("{0}. {1}" -f ($i + 1), $uniqueModels[$i]) -ForegroundColor Green }
                 $modelChoice = Read-Host "`nEnter number"
                 if ($modelChoice -as [int] -and $modelChoice -gt 0 -and $modelChoice -le $uniqueModels.Count) {
+                    # Filter devices by selected model (already filtered by category and manufacturer)
                     $devices = $devices | Where-Object { $_.$modelCol -eq $uniqueModels[$modelChoice - 1] }
                 }
 
