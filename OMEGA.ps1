@@ -445,45 +445,45 @@ function IntuneDevices {
                     }
                 }
 
+                # ===== CATEGORY SELECTION =====
+                $categorySelected = $null
+                if ($devices[0].PSObject.Properties.Name -contains $categoryCol) {
+                    $categories = $devices | Where-Object { $_.$categoryCol } | Select-Object -ExpandProperty $categoryCol -Unique | Sort-Object
+                    Write-Host "`nSelect a Category:" -ForegroundColor Cyan
+                    Write-Host "0. All Categories" -ForegroundColor Green
+                    for ($i = 0; $i -lt $categories.Count; $i++) { Write-Host ("{0}. {1}" -f ($i + 1), $categories[$i]) -ForegroundColor Green }
+                    $catChoice = Read-Host "`nEnter number"
+                    if ($catChoice -as [int] -and $catChoice -gt 0 -and $catChoice -le $categories.Count) {
+                        $categorySelected = $categories[$catChoice - 1]
+                        # Filter devices by selected category
+                        $devices = $devices | Where-Object { $_.$categoryCol -eq $categorySelected }
+                    }
+                }
+
                 # ===== MANUFACTURER SELECTION =====
                 $manufacturerSelected = $null
-                $manufacturers = $devices | Where-Object { $_.$manufacturerCol } | Select-Object -ExpandProperty $manufacturerCol -Unique | Sort-Object
+                $filteredManufacturers = $devices | Where-Object { $_.$manufacturerCol -and $_.$manufacturerCol.Trim() -ne "" } | Select-Object -ExpandProperty $manufacturerCol -Unique | Sort-Object
                 Write-Host "`nSelect a Manufacturer:" -ForegroundColor Cyan
                 Write-Host "0. All Manufacturers" -ForegroundColor Green
-                for ($i = 0; $i -lt $manufacturers.Count; $i++) { Write-Host ("{0}. {1}" -f ($i + 1), $manufacturers[$i]) -ForegroundColor Green }
+                for ($i = 0; $i -lt $filteredManufacturers.Count; $i++) { Write-Host ("{0}. {1}" -f ($i + 1), $filteredManufacturers[$i]) -ForegroundColor Green }
                 $mfgChoice = Read-Host "`nEnter number"
-                if ($mfgChoice -as [int] -and $mfgChoice -gt 0 -and $mfgChoice -le $manufacturers.Count) {
-                    $manufacturerSelected = $manufacturers[$mfgChoice - 1]
+                if ($mfgChoice -as [int] -and $mfgChoice -gt 0 -and $mfgChoice -le $filteredManufacturers.Count) {
+                    $manufacturerSelected = $filteredManufacturers[$mfgChoice - 1]
                     # Filter devices by selected manufacturer (already filtered by category)
                     $devices = $devices | Where-Object { $_.$manufacturerCol -eq $manufacturerSelected }
                 }
 
                 # ===== MODEL SELECTION =====
-                $uniqueModels = $devices | Where-Object { $_.$modelCol } | Select-Object -ExpandProperty $modelCol -Unique | Sort-Object
+                $modelSelected = $null
+                $filteredModels = $devices | Where-Object { $_.$modelCol -and $_.$modelCol.Trim() -ne "" } | Select-Object -ExpandProperty $modelCol -Unique | Sort-Object
                 Write-Host "`nSelect a Model:" -ForegroundColor Cyan
                 Write-Host "0. All Models" -ForegroundColor Green
-                for ($i = 0; $i -lt $uniqueModels.Count; $i++) { Write-Host ("{0}. {1}" -f ($i + 1), $uniqueModels[$i]) -ForegroundColor Green }
+                for ($i = 0; $i -lt $filteredModels.Count; $i++) { Write-Host ("{0}. {1}" -f ($i + 1), $filteredModels[$i]) -ForegroundColor Green }
                 $modelChoice = Read-Host "`nEnter number"
-                if ($modelChoice -as [int] -and $modelChoice -gt 0 -and $modelChoice -le $uniqueModels.Count) {
+                if ($modelChoice -as [int] -and $modelChoice -gt 0 -and $modelChoice -le $filteredModels.Count) {
+                    $modelSelected = $filteredModels[$modelChoice - 1]
                     # Filter devices by selected model (already filtered by category and manufacturer)
-                    $devices = $devices | Where-Object { $_.$modelCol -eq $uniqueModels[$modelChoice - 1] }
-                }
-
-                # ===== DISPLAY RESULT =====
-                $totalCount = $devices.Count
-                $header = "Devices by Manufacturer & Model"
-                if ($categorySelected) { $header += " (Category: $categorySelected)" }
-                if ($manufacturerSelected) { $header += " (Manufacturer: $manufacturerSelected)" }
-                if ($modelChoice -as [int] -and $modelChoice -gt 0) { $header += " (Model: $($uniqueModels[$modelChoice - 1]))" }
-                Write-Section $header
-
-                $grouped = $devices | Where-Object { $_.$manufacturerCol -and $_.$modelCol } | Group-Object -Property $manufacturerCol | Sort-Object Count -Descending
-                foreach ($mfg in $grouped) {
-                    Write-Host "`n$($mfg.Name)" -ForegroundColor Yellow
-                    $rows = $mfg.Group | Group-Object -Property $modelCol | Sort-Object Count -Descending | ForEach-Object {
-                        [PSCustomObject]@{ Model = Trunc $_.Name; Count = $_.Count }
-                    }
-                    Write-Table -Rows $rows
+                    $devices = $devices | Where-Object { $_.$modelCol -eq $modelSelected }
                 }
 
                 # ===== EXPORT =====
