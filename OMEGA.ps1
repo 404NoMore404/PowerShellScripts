@@ -515,19 +515,6 @@ function IntuneDevices {
                 }
 
 
-                # ===== MODEL SELECTION =====
-                $modelSelected = $null
-                $filteredModels = $devices | Where-Object { $_.$modelCol -and $_.$modelCol.Trim() -ne "" } | Select-Object -ExpandProperty $modelCol -Unique | Sort-Object
-                Write-Host "`nSelect a Model:" -ForegroundColor Cyan
-                Write-Host "0. All Models" -ForegroundColor Green
-                for ($i = 0; $i -lt $filteredModels.Count; $i++) { Write-Host ("{0}. {1}" -f ($i + 1), $filteredModels[$i]) -ForegroundColor Green }
-                $modelChoice = Read-Host "`nEnter number"
-                if ($modelChoice -as [int] -and $modelChoice -gt 0 -and $modelChoice -le $filteredModels.Count) {
-                    $modelSelected = $filteredModels[$modelChoice - 1]
-                    # Filter devices by selected model (already filtered by category and manufacturer)
-                    $devices = $devices | Where-Object { $_.$modelCol -eq $modelSelected }
-                }
-
                 # ===== EXPORT =====
                 Write-Host "`nExport these devices to CSV? (yes / no) [default: no]" -ForegroundColor Cyan
                 $exportChoice = Read-Host "Enter choice"
