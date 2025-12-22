@@ -543,18 +543,41 @@ function IntuneDevices {
                     Write-Table -Rows $rows
                 }
 
-                # =============================
-                # EXPORT
-                # =============================
+                # Exporting
                 Write-Host "`nTotal records found: $($filteredDevices.Count)" -ForegroundColor Cyan
                 Write-Host "Export these devices to CSV? (yes / no) [default: no]" -ForegroundColor Cyan
                 $exportChoice = Read-Host "Enter choice"
+
                 if ($exportChoice -match '^(?i)y(es)?$') {
+
+                    function Safe-Name {
+                        param([string]$Value)
+                        if ([string]::IsNullOrWhiteSpace($Value)) {
+                            return $null
+                        }
+                        # Remove the invalid filename characters
+                        return ($Value -replace '[\\\/:\*\?"<>\|]', '').Trim()
+                    }
+
+                    $categoryPart     = if ($categorySelected)     { Safe-Name $categorySelected }     else { "AllCategories" }
+                    $manufacturerPart = if ($manufacturerSelected) { Safe-Name $manufacturerSelected } else { "AllManufacturers" }
+                    $modelPart        = if ($modelSelected)        { Safe-Name $modelSelected }        else { "AllModels" }
+
                     $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-                    $exportName = "Filtered_Devices"
-                    $outPath = Join-Path $selectedFolder "$exportName`_$timestamp.csv"
+
+                    $exportName = "ModelInformation_{0}_{1}_{2}_{3}.csv" -f `
+                        $categoryPart, `
+                        $manufacturerPart, `
+                        $modelPart, `
+                        $timestamp
+
+                    $outPath = Join-Path $selectedFolder $exportName
+
                     $filteredDevices | Export-Csv $outPath -NoTypeInformation -Encoding UTF8
                     Write-Host "Exported to $outPath" -ForegroundColor Green
+                }
+                else {
+                    Write-Host "Export skipped." -ForegroundColor DarkGray
                 }
 
                 Pause
