@@ -338,9 +338,13 @@ function IntuneDevices {
 
             }
             3 { 
-            $tempFolder = "C:\Temp"
+                           $tempFolder = "C:\Temp"
                 [int]$MaxColWidth = 45
+                $tempFiles = @()
 
+                # =============================
+                # Helper Functions
+                # =============================
                 function Write-Section {
                     param([string]$Title)
                     Write-Host ""
@@ -391,7 +395,18 @@ function IntuneDevices {
                     }
                 }
 
-                # === Select Export Folder ===
+                function New-TempCsv {
+                    param([string]$baseName, [array]$data)
+                    $timestamp = Get-Date -Format "yyyyMMdd_HHmmssfff"
+                    $tempPath = Join-Path $tempFolder "$baseName`_$timestamp.csv"
+                    $data | Export-Csv $tempPath -NoTypeInformation -Encoding UTF8
+                    $tempFiles += $tempPath
+                    return $tempPath
+                }
+
+                # =============================
+                # Select Export Folder
+                # =============================
                 $exportFolders = Get-ChildItem -Path $tempFolder -Directory -Filter "IntuneDeviceExport_*" | Sort-Object LastWriteTime -Descending
                 if (-not $exportFolders) { Write-Host "No Intune export folders found." -ForegroundColor Red; Pause; return }
 
@@ -424,18 +439,23 @@ function IntuneDevices {
                 $modelCol = "Model"
                 $categoryCol = "Category"
 
-                # Validate required columns
+                # Ensure required columns exist
                 foreach ($col in @($manufacturerCol, $modelCol, $categoryCol)) {
-                    if (-not ($devices[0].PSObject.Properties.Name -contains $col)) { Write-Host "Missing required column: $col" -ForegroundColor Red; Pause; return }
+                    if (-not ($devices[0].PSObject.Properties.Name -contains $col)) {
+                        Write-Host "Missing required column: $col" -ForegroundColor Red; Pause; return
+                    }
                 }
 
                 $filteredDevices = $devices
 
-                # ===== CATEGORY SELECTION =====
+                # =============================
+                # CATEGORY SELECTION
+                # =============================
                 $categorySelected = $null
+
                 $categories = $filteredDevices |
                 Where-Object { -not [string]::IsNullOrWhiteSpace($_.$categoryCol) } |
-                ForEach-Object { ($_.$categoryCol -split '[,;/]') | ForEach-Object { $_.Trim() } } |
+                ForEach-Object { ($_.$categoryCol -split '[,;/]') | ForEach-Object { ($_ -as [string]).Trim() } } |
                 Sort-Object -Unique
 
                 Write-Host "`nSelect a Category:" -ForegroundColor Cyan
@@ -445,23 +465,24 @@ function IntuneDevices {
                 }
 
                 $catChoice = Read-Host "`nEnter number"
-
                 if ($catChoice -as [int] -and $catChoice -gt 0 -and $catChoice -le $categories.Count) {
                     $categorySelected = $categories[$catChoice - 1]
 
                     $filteredDevices = $filteredDevices | Where-Object {
-                        $catList = ([string]($_.$categoryCol)) -split '[,;/]' | ForEach-Object { $_.Trim().ToLower() }
-                        $catList -contains $categorySelected.ToLower()
+                        $catList = ($_.$categoryCol -split '[,;/]') | ForEach-Object { ($_ -as [string]).Trim() }
+                        $catList -contains $categorySelected
                     }
                 }
-                else {
-                    # Remove blanks if "All Categories" selected
-                    $filteredDevices = $filteredDevices | Where-Object { -not [string]::IsNullOrWhiteSpace($_.$categoryCol) }
-                }
 
-                Write-Host "Devices after Category filter: $($filteredDevices.Count)" -ForegroundColor Yellow
+                # Temp file after category filter
+                $filteredCsv = New-TempCsv -baseName "FilteredByCategory" -data $filteredDevices
+                $filteredDevices = Import-Csv $filteredCsv
+                Remove-Item $filteredCsv -Force  # Delete immediately
+                $tempFiles = $tempFiles | Where-Object { $_ -ne $filteredCsv }
 
-                # ===== MANUFACTURER SELECTION =====
+                # =============================
+                # MANUFACTURER SELECTION
+                # =============================
                 $manufacturerSelected = $null
                 $filteredManufacturers = $filteredDevices |
                 Where-Object { -not [string]::IsNullOrWhiteSpace($_.$manufacturerCol) } |
@@ -475,15 +496,20 @@ function IntuneDevices {
                 }
 
                 $mfgChoice = Read-Host "`nEnter number"
-
                 if ($mfgChoice -as [int] -and $mfgChoice -gt 0 -and $mfgChoice -le $filteredManufacturers.Count) {
                     $manufacturerSelected = $filteredManufacturers[$mfgChoice - 1]
-                    $filteredDevices = $filteredDevices | Where-Object {
-                        ([string]($_.$manufacturerCol)).Trim().ToLower() -eq $manufacturerSelected.ToLower()
-                    }
+                    $filteredDevices = $filteredDevices | Where-Object { ($_.$manufacturerCol -as [string]) -eq $manufacturerSelected }
                 }
 
-                # ===== MODEL SELECTION =====
+                # Temp file after manufacturer filter
+                $filteredCsv = New-TempCsv -baseName "FilteredByManufacturer" -data $filteredDevices
+                $filteredDevices = Import-Csv $filteredCsv
+                Remove-Item $filteredCsv -Force
+                $tempFiles = $tempFiles | Where-Object { $_ -ne $filteredCsv }
+
+                # =============================
+                # MODEL SELECTION
+                # =============================
                 $modelSelected = $null
                 $filteredModels = $filteredDevices |
                 Where-Object { -not [string]::IsNullOrWhiteSpace($_.$modelCol) } |
@@ -497,15 +523,20 @@ function IntuneDevices {
                 }
 
                 $modelChoice = Read-Host "`nEnter number"
-
                 if ($modelChoice -as [int] -and $modelChoice -gt 0 -and $modelChoice -le $filteredModels.Count) {
                     $modelSelected = $filteredModels[$modelChoice - 1]
-                    $filteredDevices = $filteredDevices | Where-Object {
-                        ([string]($_.$modelCol)).Trim().ToLower() -eq $modelSelected.ToLower()
-                    }
+                    $filteredDevices = $filteredDevices | Where-Object { ($_.$modelCol -as [string]) -eq $modelSelected }
                 }
 
-                # ===== DISPLAY RESULT =====
+                # Temp file after model filter
+                $filteredCsv = New-TempCsv -baseName "FilteredByModel" -data $filteredDevices
+                $filteredDevices = Import-Csv $filteredCsv
+                Remove-Item $filteredCsv -Force
+                $tempFiles = $tempFiles | Where-Object { $_ -ne $filteredCsv }
+
+                # =============================
+                # DISPLAY RESULTS
+                # =============================
                 $header = "Devices by Manufacturer & Model"
                 if ($categorySelected) { $header += " (Category: $categorySelected)" }
                 if ($manufacturerSelected) { $header += " (Manufacturer: $manufacturerSelected)" }
@@ -521,7 +552,9 @@ function IntuneDevices {
                     Write-Table -Rows $rows
                 }
 
-                # ===== EXPORT =====
+                # =============================
+                # EXPORT
+                # =============================
                 Write-Host "`nExport these devices to CSV? (yes / no) [default: no]" -ForegroundColor Cyan
                 $exportChoice = Read-Host "Enter choice"
                 if ($exportChoice -match '^(?i)y(es)?$') {
@@ -538,9 +571,17 @@ function IntuneDevices {
                     Write-Host "Export skipped." -ForegroundColor DarkGray
                 }
 
+
                 Pause
+                # =============================
+                # CLEAN UP TEMP FILES
+                # =============================
+                foreach ($file in $tempFiles) {
+                    if (Test-Path $file) { Remove-Item $file -Force }
+                }
+                $tempFiles = @()
 
-
+ 
              }
             4 {
                 $tempFolder = "C:\Temp"
