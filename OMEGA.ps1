@@ -440,19 +440,24 @@ function IntuneDevices {
                 # Start with the full list
                 $filteredDevices = $devices
 
-# =============================
-# CATEGORY SELECTION (Deep-Clean Version)
-# =============================
+# ==========================================
+# CATEGORY SELECTION (Index-Based Filtering)
+# ==========================================
 $categorySelected = $null
 
-Write-Host "Analyzing 18,000 rows... please wait." -ForegroundColor Gray
+# Intune CSVs often have 'Category' at Index 24 (Column 25)
+$catIndex = 24 
 
-# 1. Extract categories using a 'clean' approach
-$categories = $filteredDevices | ForEach-Object {
-    $val = $_."Category" # Using name, but we will clean the result
-    if ($val) {
-        # Split by possible delimiters, Trim whitespace, and remove empty results
-        $val.Split(',;/').Trim() | Where-Object { $_ -ne "" }
+Write-Host "Analyzing data by column index $catIndex..." -ForegroundColor Gray
+
+# 1. Get unique categories by looking at the specific property index
+$categories = $devices | ForEach-Object {
+    # Get all property values for this row and pick the one at our index
+    $rowValues = $_.PSObject.Properties.Value
+    $val = $rowValues[$catIndex]
+    
+    if (-not [string]::IsNullOrWhiteSpace($val)) {
+        $val.ToString().Split(',;/').Trim() | Where-Object { $_ -ne "" }
     }
 } | Select-Object -Unique | Sort-Object
 
@@ -465,18 +470,22 @@ for ($i = 0; $i -lt $categories.Count; $i++) {
 $catChoice = Read-Host "`nEnter number"
 
 if ($catChoice -eq "0") {
-    $filteredDevices = $filteredDevices | Where-Object { 
-        -not [string]::IsNullOrWhiteSpace($_."Category") 
+    $filteredDevices = $devices | Where-Object { 
+        $val = $_.PSObject.Properties.Value[$catIndex]
+        -not [string]::IsNullOrWhiteSpace($val)
     }
 }
 elseif ($catChoice -as [int] -and $catChoice -gt 0 -and $catChoice -le $categories.Count) {
     $categorySelected = $categories[$catChoice - 1]
-    
-    # 2. THE FILTER: We trim the data ON THE FLY to ignore random spaces
-    $filteredDevices = $filteredDevices | Where-Object {
-        $cellValue = $_."Category"
+    Write-Host "Filtering for: $categorySelected" -ForegroundColor Yellow
+
+    # 2. PERFORM THE FILTER
+    $filteredDevices = $devices | Where-Object {
+        $rowValues = $_.PSObject.Properties.Value
+        $cellValue = $rowValues[$catIndex]
+        
         if ($null -ne $cellValue) {
-            # Clean the cell value and check if our selection is inside it
+            # Check if the selection exists in the split/trimmed list of that cell
             $cleanedList = ($cellValue.ToString().Split(',;/')).Trim()
             $cleanedList -contains $categorySelected
         } else {
@@ -485,7 +494,7 @@ elseif ($catChoice -as [int] -and $catChoice -gt 0 -and $catChoice -le $categori
     }
 }
 
-Write-Host "Current Selection Count: $($filteredDevices.Count)" -ForegroundColor Yellow
+Write-Host "Records after Category filter: $($filteredDevices.Count)" -ForegroundColor Green
 
                 # =============================
                 # MANUFACTURER SELECTION
