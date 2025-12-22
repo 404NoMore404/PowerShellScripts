@@ -338,7 +338,7 @@ function IntuneDevices {
 
             }
             3 { 
-                                $tempFolder = "C:\Temp"
+            $tempFolder = "C:\Temp"
                 [int]$MaxColWidth = 45
 
                 function Write-Section {
@@ -368,7 +368,7 @@ function IntuneDevices {
                     $widths = @{}
 
                     foreach ($col in $columns) {
-                        $max = ($Rows | ForEach-Object { ([string]($_.$col) | Out-String).Trim().Length } | Measure-Object -Maximum).Maximum
+                        $max = ($Rows | ForEach-Object { ($_.$col | Out-String).Trim().Length } | Measure-Object -Maximum).Maximum
                         if ($col.Length -gt $max) { $max = $col.Length }
                         if ($max -gt $MaxColWidth) { $max = $MaxColWidth }
                         $widths[$col] = $max
@@ -384,7 +384,7 @@ function IntuneDevices {
                     Write-Host ""
                     foreach ($row in $Rows) {
                         foreach ($col in $columns) {
-                            $value = Trunc ([string]($row.$col)) $widths[$col]
+                            $value = Trunc ($row.$col) $widths[$col]
                             Write-Host ($value.PadRight($widths[$col] + 2)) -NoNewline
                         }
                         Write-Host ""
@@ -424,22 +424,18 @@ function IntuneDevices {
                 $modelCol = "Model"
                 $categoryCol = "Category"
 
-                $allDevices = $devices
-                $filteredDevices = $allDevices
-
-                foreach ($col in @($manufacturerCol, $modelCol)) {
+                # Validate required columns
+                foreach ($col in @($manufacturerCol, $modelCol, $categoryCol)) {
                     if (-not ($devices[0].PSObject.Properties.Name -contains $col)) { Write-Host "Missing required column: $col" -ForegroundColor Red; Pause; return }
                 }
 
+                $filteredDevices = $devices
+
                 # ===== CATEGORY SELECTION =====
                 $categorySelected = $null
-
-                # Build clean category list (exclude blanks, split multi-values)
                 $categories = $filteredDevices |
-                Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.$categoryCol) } |
-                ForEach-Object {
-                    ($_.$categoryCol -split '[,;/]') | ForEach-Object { $_.Trim() }
-                } |
+                Where-Object { -not [string]::IsNullOrWhiteSpace($_.$categoryCol) } |
+                ForEach-Object { ($_.$categoryCol -split '[,;/]') | ForEach-Object { $_.Trim() } } |
                 Sort-Object -Unique
 
                 Write-Host "`nSelect a Category:" -ForegroundColor Cyan
@@ -452,11 +448,15 @@ function IntuneDevices {
 
                 if ($catChoice -as [int] -and $catChoice -gt 0 -and $catChoice -le $categories.Count) {
                     $categorySelected = $categories[$catChoice - 1]
+
                     $filteredDevices = $filteredDevices | Where-Object {
-                        $val = [string]($_.$categoryCol)
-                        -not [string]::IsNullOrWhiteSpace($val) -and 
-                        ($val -split '[,;/]' | ForEach-Object { $_.Trim().ToLower() }) -contains $categorySelected.ToLower()
+                        $catList = ([string]($_.$categoryCol)) -split '[,;/]' | ForEach-Object { $_.Trim().ToLower() }
+                        $catList -contains $categorySelected.ToLower()
                     }
+                }
+                else {
+                    # Remove blanks if "All Categories" selected
+                    $filteredDevices = $filteredDevices | Where-Object { -not [string]::IsNullOrWhiteSpace($_.$categoryCol) }
                 }
 
                 Write-Host "Devices after Category filter: $($filteredDevices.Count)" -ForegroundColor Yellow
@@ -464,7 +464,7 @@ function IntuneDevices {
                 # ===== MANUFACTURER SELECTION =====
                 $manufacturerSelected = $null
                 $filteredManufacturers = $filteredDevices |
-                Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.$manufacturerCol) } |
+                Where-Object { -not [string]::IsNullOrWhiteSpace($_.$manufacturerCol) } |
                 Select-Object -ExpandProperty $manufacturerCol -Unique |
                 Sort-Object
 
@@ -479,15 +479,14 @@ function IntuneDevices {
                 if ($mfgChoice -as [int] -and $mfgChoice -gt 0 -and $mfgChoice -le $filteredManufacturers.Count) {
                     $manufacturerSelected = $filteredManufacturers[$mfgChoice - 1]
                     $filteredDevices = $filteredDevices | Where-Object {
-                        $val = [string]($_.$manufacturerCol)
-                        -not [string]::IsNullOrWhiteSpace($val) -and $val.Trim().ToLower() -eq $manufacturerSelected.ToLower()
+                        ([string]($_.$manufacturerCol)).Trim().ToLower() -eq $manufacturerSelected.ToLower()
                     }
                 }
 
                 # ===== MODEL SELECTION =====
                 $modelSelected = $null
                 $filteredModels = $filteredDevices |
-                Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.$modelCol) } |
+                Where-Object { -not [string]::IsNullOrWhiteSpace($_.$modelCol) } |
                 Select-Object -ExpandProperty $modelCol -Unique |
                 Sort-Object
 
@@ -502,11 +501,9 @@ function IntuneDevices {
                 if ($modelChoice -as [int] -and $modelChoice -gt 0 -and $modelChoice -le $filteredModels.Count) {
                     $modelSelected = $filteredModels[$modelChoice - 1]
                     $filteredDevices = $filteredDevices | Where-Object {
-                        $val = [string]($_.$modelCol)
-                        -not [string]::IsNullOrWhiteSpace($val) -and $val.Trim().ToLower() -eq $modelSelected.ToLower()
+                        ([string]($_.$modelCol)).Trim().ToLower() -eq $modelSelected.ToLower()
                     }
                 }
-
 
                 # ===== DISPLAY RESULT =====
                 $header = "Devices by Manufacturer & Model"
@@ -542,6 +539,7 @@ function IntuneDevices {
                 }
 
                 Pause
+
 
              }
             4 {
