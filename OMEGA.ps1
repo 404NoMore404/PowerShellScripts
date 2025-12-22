@@ -440,51 +440,52 @@ function IntuneDevices {
                 # Start with the full list
                 $filteredDevices = $devices
 
-                # =============================
-                # CATEGORY SELECTION (Fixed & Aggressive)
-                # =============================
-                $categorySelected = $null
+# =============================
+# CATEGORY SELECTION (Deep-Clean Version)
+# =============================
+$categorySelected = $null
 
-                # 1. Get unique categories and clean them up
-                $categories = $devices | 
-                Where-Object { -not [string]::IsNullOrWhiteSpace($_."$categoryCol") } | 
-                ForEach-Object { 
-                    # Split by delimiters and trim whitespace from each resulting string
-                    ($_."$categoryCol" -split '[,;/]') | ForEach-Object { $_.Trim() }
-                } | Sort-Object -Unique
+Write-Host "Analyzing 18,000 rows... please wait." -ForegroundColor Gray
 
-                Write-Host "`nSelect a Category:" -ForegroundColor Cyan
-                Write-Host "0. All Categories (exclude blanks)" -ForegroundColor Green
-                for ($i = 0; $i -lt $categories.Count; $i++) {
-                    Write-Host ("{0}. {1}" -f ($i + 1), $categories[$i]) -ForegroundColor Green
-                }
+# 1. Extract categories using a 'clean' approach
+$categories = $filteredDevices | ForEach-Object {
+    $val = $_."Category" # Using name, but we will clean the result
+    if ($val) {
+        # Split by possible delimiters, Trim whitespace, and remove empty results
+        $val.Split(',;/').Trim() | Where-Object { $_ -ne "" }
+    }
+} | Select-Object -Unique | Sort-Object
 
-                $catChoice = Read-Host "`nEnter number"
+Write-Host "`nSelect a Category:" -ForegroundColor Cyan
+Write-Host "0. All Categories (exclude blanks)" -ForegroundColor Green
+for ($i = 0; $i -lt $categories.Count; $i++) {
+    Write-Host ("{0}. {1}" -f ($i + 1), $categories[$i]) -ForegroundColor Green
+}
 
-                if ($catChoice -eq "0") {
-                    # Keep only rows that aren't empty
-                    $filteredDevices = $devices | Where-Object { -not [string]::IsNullOrWhiteSpace($_."$categoryCol") }
-                }
-                elseif ($catChoice -as [int] -and $catChoice -gt 0 -and $catChoice -le $categories.Count) {
-                    $categorySelected = $categories[$catChoice - 1]
-                    Write-Host "Filtering for Category: $categorySelected..." -ForegroundColor Yellow
+$catChoice = Read-Host "`nEnter number"
+
+if ($catChoice -eq "0") {
+    $filteredDevices = $filteredDevices | Where-Object { 
+        -not [string]::IsNullOrWhiteSpace($_."Category") 
+    }
+}
+elseif ($catChoice -as [int] -and $catChoice -gt 0 -and $catChoice -le $categories.Count) {
+    $categorySelected = $categories[$catChoice - 1]
     
-                    # 2. Re-assign $filteredDevices to a NEW filtered array
-                    # We use .Trim() on the column value during comparison to ensure hidden spaces don't break the match
-                    $filteredDevices = $devices | Where-Object { 
-                        $val = $_."$categoryCol"
-                        if ($null -ne $val) {
-                            # Check if the specific category exists within the string (handles multi-category cells)
-                            ($val -split '[,;/]').Trim() -contains $categorySelected
-                        }
-                        else {
-                            $false
-                        }
-                    }
-                }
+    # 2. THE FILTER: We trim the data ON THE FLY to ignore random spaces
+    $filteredDevices = $filteredDevices | Where-Object {
+        $cellValue = $_."Category"
+        if ($null -ne $cellValue) {
+            # Clean the cell value and check if our selection is inside it
+            $cleanedList = ($cellValue.ToString().Split(',;/')).Trim()
+            $cleanedList -contains $categorySelected
+        } else {
+            $false
+        }
+    }
+}
 
-                # 3. Validation: Check if the filter actually worked before moving to Manufacturer
-                Write-Host "Records after Category filter: $($filteredDevices.Count)" -ForegroundColor Gray
+Write-Host "Current Selection Count: $($filteredDevices.Count)" -ForegroundColor Yellow
 
                 # =============================
                 # MANUFACTURER SELECTION
