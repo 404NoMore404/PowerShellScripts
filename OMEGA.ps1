@@ -441,16 +441,17 @@ function IntuneDevices {
                 $filteredDevices = $devices
 
                 # =============================
-                # CATEGORY SELECTION
+                # CATEGORY SELECTION (Fixed & Aggressive)
                 # =============================
                 $categorySelected = $null
-                Write-Host "Processing categories..." -ForegroundColor Gray
 
-                # Faster way to extract unique categories from large arrays
-                $categories = $filteredDevices."$categoryCol" | 
-                Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | 
-                ForEach-Object { $_.Split(',;/').Trim() } | 
-                Select-Object -Unique | Sort-Object
+                # 1. Get unique categories and clean them up
+                $categories = $devices | 
+                Where-Object { -not [string]::IsNullOrWhiteSpace($_."$categoryCol") } | 
+                ForEach-Object { 
+                    # Split by delimiters and trim whitespace from each resulting string
+                    ($_."$categoryCol" -split '[,;/]') | ForEach-Object { $_.Trim() }
+                } | Sort-Object -Unique
 
                 Write-Host "`nSelect a Category:" -ForegroundColor Cyan
                 Write-Host "0. All Categories (exclude blanks)" -ForegroundColor Green
@@ -459,14 +460,31 @@ function IntuneDevices {
                 }
 
                 $catChoice = Read-Host "`nEnter number"
+
                 if ($catChoice -eq "0") {
-                    $filteredDevices = $filteredDevices | Where-Object { -not [string]::IsNullOrWhiteSpace($_."$categoryCol") }
+                    # Keep only rows that aren't empty
+                    $filteredDevices = $devices | Where-Object { -not [string]::IsNullOrWhiteSpace($_."$categoryCol") }
                 }
                 elseif ($catChoice -as [int] -and $catChoice -gt 0 -and $catChoice -le $categories.Count) {
                     $categorySelected = $categories[$catChoice - 1]
-                    # Use -like for performance on large sets
-                    $filteredDevices = $filteredDevices | Where-Object { $_."$categoryCol" -like "*$categorySelected*" }
+                    Write-Host "Filtering for Category: $categorySelected..." -ForegroundColor Yellow
+    
+                    # 2. Re-assign $filteredDevices to a NEW filtered array
+                    # We use .Trim() on the column value during comparison to ensure hidden spaces don't break the match
+                    $filteredDevices = $devices | Where-Object { 
+                        $val = $_."$categoryCol"
+                        if ($null -ne $val) {
+                            # Check if the specific category exists within the string (handles multi-category cells)
+                            ($val -split '[,;/]').Trim() -contains $categorySelected
+                        }
+                        else {
+                            $false
+                        }
+                    }
                 }
+
+                # 3. Validation: Check if the filter actually worked before moving to Manufacturer
+                Write-Host "Records after Category filter: $($filteredDevices.Count)" -ForegroundColor Gray
 
                 # =============================
                 # MANUFACTURER SELECTION
