@@ -419,30 +419,28 @@ function IntuneDevices {
                 $csv = Get-ChildItem $selectedFolder -Filter *.csv | Select-Object -First 1
                 if (-not $csv) { Write-Host "No CSV found." -ForegroundColor Red; return }
 
-                $devices = Import-Csv $csv.FullName
+                $allDevices = Import-Csv $csv.FullName
                 $manufacturerCol = "Manufacturer"
                 $modelCol = "Model"
                 $categoryCol = "Category"
 
-                $allDevices = $devices
-                $filteredDevices = $allDevices
-
-
-
-                foreach ($col in @($manufacturerCol, $modelCol)) {
-                    if (-not ($devices[0].PSObject.Properties.Name -contains $col)) { Write-Host "Missing required column: $col" -ForegroundColor Red; Pause; return }
+                # Validate required columns
+                foreach ($col in @($manufacturerCol, $modelCol, $categoryCol)) {
+                    if (-not ($allDevices[0].PSObject.Properties.Name -contains $col)) { 
+                        Write-Host "Missing required column: $col" -ForegroundColor Red; Pause; return 
+                    }
                 }
+
+                # Start with all devices for filtering
+                $filteredDevices = $allDevices
 
                 # ===== CATEGORY SELECTION =====
                 $categorySelected = $null
-
-                # Build clean category list (exclude blanks, split multi-values)
-                $categories = $devices |
+                $categories = $filteredDevices |
                 Where-Object { -not [string]::IsNullOrWhiteSpace($_.$categoryCol) } |
-                ForEach-Object {
-                    $_.$categoryCol -split '[,;/]' | ForEach-Object { $_.Trim() }
-                } |
-                Sort-Object -Unique
+                Select-Object -ExpandProperty $categoryCol -Unique |
+                ForEach-Object { $_.Trim() } |
+                Sort-Object
 
                 Write-Host "`nSelect a Category:" -ForegroundColor Cyan
                 Write-Host "0. All Categories (exclude blanks)" -ForegroundColor Green
@@ -452,30 +450,21 @@ function IntuneDevices {
 
                 $catChoice = Read-Host "`nEnter number"
 
-                # Always remove blank categories once filtering starts
-                $devices = $devices | Where-Object {
-                    -not [string]::IsNullOrWhiteSpace($_.$categoryCol)
-                }
-
                 if ($catChoice -as [int] -and $catChoice -gt 0 -and $catChoice -le $categories.Count) {
                     $categorySelected = $categories[$catChoice - 1]
-
-                    $devices = $devices | Where-Object {
-                        (
-                            $_.$categoryCol -split '[,;/]' |
-                            ForEach-Object { $_.Trim().ToLower() }
-                        ) -contains $categorySelected.ToLower()
+                    $filteredDevices = $filteredDevices | Where-Object {
+                        ($_.$categoryCol -split '[,;/]' | ForEach-Object { $_.Trim().ToLower() }) -contains $categorySelected.ToLower()
                     }
                 }
 
-                Write-Host "Devices after Category filter: $($devices.Count)" -ForegroundColor Yellow
-
+                Write-Host "Devices after Category filter: $($filteredDevices.Count)" -ForegroundColor Yellow
 
                 # ===== MANUFACTURER SELECTION =====
                 $manufacturerSelected = $null
-                $filteredManufacturers = $devices |
+                $filteredManufacturers = $filteredDevices |
                 Where-Object { -not [string]::IsNullOrWhiteSpace($_.$manufacturerCol) } |
                 Select-Object -ExpandProperty $manufacturerCol -Unique |
+                ForEach-Object { $_.Trim() } |
                 Sort-Object
 
                 Write-Host "`nSelect a Manufacturer:" -ForegroundColor Cyan
@@ -488,15 +477,15 @@ function IntuneDevices {
 
                 if ($mfgChoice -as [int] -and $mfgChoice -gt 0 -and $mfgChoice -le $filteredManufacturers.Count) {
                     $manufacturerSelected = $filteredManufacturers[$mfgChoice - 1]
-                    $devices = $devices | Where-Object { $_.$manufacturerCol -eq $manufacturerSelected }
+                    $filteredDevices = $filteredDevices | Where-Object { $_.$manufacturerCol.Trim().ToLower() -eq $manufacturerSelected.ToLower() }
                 }
-
 
                 # ===== MODEL SELECTION =====
                 $modelSelected = $null
-                $filteredModels = $devices |
+                $filteredModels = $filteredDevices |
                 Where-Object { -not [string]::IsNullOrWhiteSpace($_.$modelCol) } |
                 Select-Object -ExpandProperty $modelCol -Unique |
+                ForEach-Object { $_.Trim() } |
                 Sort-Object
 
                 Write-Host "`nSelect a Model:" -ForegroundColor Cyan
@@ -509,20 +498,19 @@ function IntuneDevices {
 
                 if ($modelChoice -as [int] -and $modelChoice -gt 0 -and $modelChoice -le $filteredModels.Count) {
                     $modelSelected = $filteredModels[$modelChoice - 1]
-                    $devices = $devices | Where-Object { $_.$modelCol -eq $modelSelected }
+                    $filteredDevices = $filteredDevices | Where-Object { $_.$modelCol.Trim().ToLower() -eq $modelSelected.ToLower() }
                 }
 
-
-
                 # ===== DISPLAY RESULT =====
-                $totalCount = $filteredDevices.Count
                 $header = "Devices by Manufacturer & Model"
                 if ($categorySelected) { $header += " (Category: $categorySelected)" }
                 if ($manufacturerSelected) { $header += " (Manufacturer: $manufacturerSelected)" }
-                if ($modelChoice -as [int] -and $modelChoice -gt 0) { $header += " (Model: $($uniqueModels[$modelChoice - 1]))" }
+                if ($modelSelected) { $header += " (Model: $modelSelected)" }
                 Write-Section $header
 
-                $grouped = $filteredDevices | Where-Object { $_.$manufacturerCol -and $_.$modelCol } | Group-Object -Property $manufacturerCol | Sort-Object Count -Descending
+                $grouped = $filteredDevices | Where-Object { $_.$manufacturerCol -and $_.$modelCol } |
+                Group-Object -Property $manufacturerCol | Sort-Object Count -Descending
+
                 foreach ($mfg in $grouped) {
                     Write-Host "`n$($mfg.Name)" -ForegroundColor Yellow
                     $rows = $mfg.Group | Group-Object -Property $modelCol | Sort-Object Count -Descending | ForEach-Object {
@@ -539,7 +527,7 @@ function IntuneDevices {
                     $exportName = "Devices"
                     if ($categorySelected) { $exportName += "_$categorySelected" }
                     if ($manufacturerSelected) { $exportName += "_$manufacturerSelected" }
-                    if ($modelChoice -as [int] -and $modelChoice -gt 0) { $exportName += "_$($uniqueModels[$modelChoice - 1])" }
+                    if ($modelSelected) { $exportName += "_$modelSelected" }
                     $outPath = Join-Path $selectedFolder "$exportName`_$timestamp.csv"
                     $filteredDevices | Export-Csv $outPath -NoTypeInformation -Encoding UTF8
                     Write-Host "Exported to $outPath" -ForegroundColor Green
@@ -549,6 +537,7 @@ function IntuneDevices {
                 }
 
                 Pause
+
              }
             4 {
                 $tempFolder = "C:\Temp"
