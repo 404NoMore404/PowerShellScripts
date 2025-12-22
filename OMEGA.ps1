@@ -338,7 +338,7 @@ function IntuneDevices {
 
             }
             3 { 
-               $tempFolder = "C:\Temp"
+                $tempFolder = "C:\Temp"
                 [int]$MaxColWidth = 45
 
                 function Write-Section {
@@ -424,49 +424,56 @@ function IntuneDevices {
                 $modelCol = "Model"
                 $categoryCol = "Category"
 
+                $allDevices = $devices
+                $filteredDevices = $allDevices
+
+
+
                 foreach ($col in @($manufacturerCol, $modelCol)) {
                     if (-not ($devices[0].PSObject.Properties.Name -contains $col)) { Write-Host "Missing required column: $col" -ForegroundColor Red; Pause; return }
                 }
 
-# ===== CATEGORY SELECTION =====
+                # ===== CATEGORY SELECTION =====
                 $categorySelected = $null
-                if ($devices[0].PSObject.Properties.Name -contains $categoryCol) {
 
-                    # Build category list ONLY from rows that actually have a category
-                    $categories = $devices |
-                    Where-Object { -not [string]::IsNullOrWhiteSpace($_.$categoryCol) } |
-                    ForEach-Object {
-                        $_.$categoryCol -split '[,;/]' | ForEach-Object { $_.Trim() }
-                    } |
-                    Sort-Object -Unique
+                $categories = $allDevices |
+                Where-Object { -not [string]::IsNullOrWhiteSpace($_.$categoryCol) } |
+                ForEach-Object {
+                    $_.$categoryCol -split '[,;/]' | ForEach-Object { $_.Trim() }
+                } |
+                Sort-Object -Unique
 
-                    Write-Host "`nSelect a Category:" -ForegroundColor Cyan
-                    Write-Host "0. All Categories" -ForegroundColor Green
-                    for ($i = 0; $i -lt $categories.Count; $i++) {
-                        Write-Host ("{0}. {1}" -f ($i + 1), $categories[$i]) -ForegroundColor Green
-                    }
+                Write-Host "`nSelect a Category:" -ForegroundColor Cyan
+                Write-Host "0. All Categories (exclude blanks)" -ForegroundColor Green
+                for ($i = 0; $i -lt $categories.Count; $i++) {
+                    Write-Host ("{0}. {1}" -f ($i + 1), $categories[$i]) -ForegroundColor Green
+                }
 
-                    $catChoice = Read-Host "`nEnter number"
+                $catChoice = Read-Host "`nEnter number"
 
-                    if ($catChoice -as [int] -and $catChoice -gt 0 -and $catChoice -le $categories.Count) {
-                        $categorySelected = $categories[$catChoice - 1]
+                # 🔒 ALWAYS exclude blank Category rows
+                $filteredDevices = $filteredDevices | Where-Object {
+                    -not [string]::IsNullOrWhiteSpace($_.$categoryCol)
+                }
 
-                        # HARD FILTER:
-                        # - Category must exist
-                        # - Category must contain selected value
-                        $devices = $devices | Where-Object {
-                            -not [string]::IsNullOrWhiteSpace($_.$categoryCol) -and
-                            (
-                                $_.$categoryCol -split '[,;/]' |
-                                ForEach-Object { $_.Trim().ToLower() }
-                            ) -contains $categorySelected.ToLower()
-                        }
+                if ($catChoice -as [int] -and $catChoice -gt 0 -and $catChoice -le $categories.Count) {
+                    $categorySelected = $categories[$catChoice - 1]
+
+                    $filteredDevices = $filteredDevices | Where-Object {
+                        (
+                            $_.$categoryCol -split '[,;/]' |
+                            ForEach-Object { $_.Trim().ToLower() }
+                        ) -contains $categorySelected.ToLower()
                     }
                 }
+                
+                Write-Host "Remaining devices: $($filteredDevices.Count)" -ForegroundColor Yellow
+
 
                 # ===== MANUFACTURER SELECTION =====
                 $manufacturerSelected = $null
-                $filteredManufacturers = $devices |
+
+                $filteredManufacturers = $filteredDevices |
                 Where-Object { -not [string]::IsNullOrWhiteSpace($_.$manufacturerCol) } |
                 Select-Object -ExpandProperty $manufacturerCol -Unique |
                 ForEach-Object { $_.Trim() } |
@@ -483,15 +490,18 @@ function IntuneDevices {
                 if ($mfgChoice -as [int] -and $mfgChoice -gt 0 -and $mfgChoice -le $filteredManufacturers.Count) {
                     $manufacturerSelected = $filteredManufacturers[$mfgChoice - 1]
 
-                    # Filter devices by selected manufacturer (already category-filtered)
-                    $devices = $devices | Where-Object {
+                    $filteredDevices = $filteredDevices | Where-Object {
                         $_.$manufacturerCol.Trim().ToLower() -eq $manufacturerSelected.ToLower()
                     }
                 }
 
+                Write-Host "Remaining devices: $($filteredDevices.Count)" -ForegroundColor Yellow
+
+
                 # ===== MODEL SELECTION =====
                 $modelSelected = $null
-                $filteredModels = $devices |
+
+                $uniqueModels = $filteredDevices |
                 Where-Object { -not [string]::IsNullOrWhiteSpace($_.$modelCol) } |
                 Select-Object -ExpandProperty $modelCol -Unique |
                 ForEach-Object { $_.Trim() } |
@@ -499,21 +509,40 @@ function IntuneDevices {
 
                 Write-Host "`nSelect a Model:" -ForegroundColor Cyan
                 Write-Host "0. All Models" -ForegroundColor Green
-                for ($i = 0; $i -lt $filteredModels.Count; $i++) {
-                    Write-Host ("{0}. {1}" -f ($i + 1), $filteredModels[$i]) -ForegroundColor Green
+                for ($i = 0; $i -lt $uniqueModels.Count; $i++) {
+                    Write-Host ("{0}. {1}" -f ($i + 1), $uniqueModels[$i]) -ForegroundColor Green
                 }
 
                 $modelChoice = Read-Host "`nEnter number"
 
-                if ($modelChoice -as [int] -and $modelChoice -gt 0 -and $modelChoice -le $filteredModels.Count) {
-                    $modelSelected = $filteredModels[$modelChoice - 1]
+                if ($modelChoice -as [int] -and $modelChoice -gt 0 -and $modelChoice -le $uniqueModels.Count) {
+                    $modelSelected = $uniqueModels[$modelChoice - 1]
 
-                    # Filter devices by selected model (already category + manufacturer filtered)
-                    $devices = $devices | Where-Object {
+                    $filteredDevices = $filteredDevices | Where-Object {
                         $_.$modelCol.Trim().ToLower() -eq $modelSelected.ToLower()
                     }
                 }
 
+                Write-Host "Remaining devices: $($filteredDevices.Count)" -ForegroundColor Yellow
+
+
+
+                # ===== DISPLAY RESULT =====
+                $totalCount = $filteredDevices.Count
+                $header = "Devices by Manufacturer & Model"
+                if ($categorySelected) { $header += " (Category: $categorySelected)" }
+                if ($manufacturerSelected) { $header += " (Manufacturer: $manufacturerSelected)" }
+                if ($modelChoice -as [int] -and $modelChoice -gt 0) { $header += " (Model: $($uniqueModels[$modelChoice - 1]))" }
+                Write-Section $header
+
+                $grouped = $filteredDevices | Where-Object { $_.$manufacturerCol -and $_.$modelCol } | Group-Object -Property $manufacturerCol | Sort-Object Count -Descending
+                foreach ($mfg in $grouped) {
+                    Write-Host "`n$($mfg.Name)" -ForegroundColor Yellow
+                    $rows = $mfg.Group | Group-Object -Property $modelCol | Sort-Object Count -Descending | ForEach-Object {
+                        [PSCustomObject]@{ Model = Trunc $_.Name; Count = $_.Count }
+                    }
+                    Write-Table -Rows $rows
+                }
 
                 # ===== EXPORT =====
                 Write-Host "`nExport these devices to CSV? (yes / no) [default: no]" -ForegroundColor Cyan
@@ -525,7 +554,7 @@ function IntuneDevices {
                     if ($manufacturerSelected) { $exportName += "_$manufacturerSelected" }
                     if ($modelChoice -as [int] -and $modelChoice -gt 0) { $exportName += "_$($uniqueModels[$modelChoice - 1])" }
                     $outPath = Join-Path $selectedFolder "$exportName`_$timestamp.csv"
-                    $devices | Export-Csv $outPath -NoTypeInformation -Encoding UTF8
+                    $filteredDevices | Export-Csv $outPath -NoTypeInformation -Encoding UTF8
                     Write-Host "Exported to $outPath" -ForegroundColor Green
                 }
                 else {
