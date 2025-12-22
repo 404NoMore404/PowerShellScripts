@@ -338,9 +338,8 @@ function IntuneDevices {
 
             }
             3 { 
-                           $tempFolder = "C:\Temp"
+                $tempFolder = "C:\Temp"
                 [int]$MaxColWidth = 45
-                $tempFiles = @()
 
                 # =============================
                 # Helper Functions
@@ -372,7 +371,7 @@ function IntuneDevices {
                     $widths = @{}
 
                     foreach ($col in $columns) {
-                        $max = ($Rows | ForEach-Object { ($_.$col | Out-String).Trim().Length } | Measure-Object -Maximum).Maximum
+                        $max = ($Rows | ForEach-Object { ($_.($col) | Out-String).Trim().Length } | Measure-Object -Maximum).Maximum
                         if ($col.Length -gt $max) { $max = $col.Length }
                         if ($max -gt $MaxColWidth) { $max = $MaxColWidth }
                         $widths[$col] = $max
@@ -388,20 +387,11 @@ function IntuneDevices {
                     Write-Host ""
                     foreach ($row in $Rows) {
                         foreach ($col in $columns) {
-                            $value = Trunc ($row.$col) $widths[$col]
+                            $value = Trunc ($row.($col)) $widths[$col]
                             Write-Host ($value.PadRight($widths[$col] + 2)) -NoNewline
                         }
                         Write-Host ""
                     }
-                }
-
-                function New-TempCsv {
-                    param([string]$baseName, [array]$data)
-                    $timestamp = Get-Date -Format "yyyyMMdd_HHmmssfff"
-                    $tempPath = Join-Path $tempFolder "$baseName`_$timestamp.csv"
-                    $data | Export-Csv $tempPath -NoTypeInformation -Encoding UTF8
-                    $tempFiles += $tempPath
-                    return $tempPath
                 }
 
                 # =============================
@@ -430,11 +420,12 @@ function IntuneDevices {
                     $selectedFolder = $folderOptions[$choice - 1]
                 }
 
-                Write-Host "`nSelected Folder: $selectedFolder" -ForegroundColor Cyan
-                $csv = Get-ChildItem $selectedFolder -Filter *.csv | Select-Object -First 1
-                if (-not $csv) { Write-Host "No CSV found." -ForegroundColor Red; return }
+                Write-Host "`nLoading data... please wait." -ForegroundColor Gray
+                $csvFile = Get-ChildItem $selectedFolder -Filter *.csv | Select-Object -First 1
+                if (-not $csvFile) { Write-Host "No CSV found." -ForegroundColor Red; return }
 
-                $devices = Import-Csv $csv.FullName
+                # Load full dataset into memory once
+                $devices = Import-Csv $csvFile.FullName
                 $manufacturerCol = "Manufacturer"
                 $modelCol = "Model"
                 $categoryCol = "Category"
@@ -446,17 +437,20 @@ function IntuneDevices {
                     }
                 }
 
+                # Start with the full list
                 $filteredDevices = $devices
 
                 # =============================
                 # CATEGORY SELECTION
                 # =============================
                 $categorySelected = $null
+                Write-Host "Processing categories..." -ForegroundColor Gray
 
-                $categories = $filteredDevices |
-                Where-Object { -not [string]::IsNullOrWhiteSpace($_.$categoryCol) } |
-                ForEach-Object { ($_.$categoryCol -split '[,;/]') | ForEach-Object { ($_ -as [string]).Trim() } } |
-                Sort-Object -Unique
+                # Faster way to extract unique categories from large arrays
+                $categories = $filteredDevices."$categoryCol" | 
+                Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | 
+                ForEach-Object { $_.Split(',;/').Trim() } | 
+                Select-Object -Unique | Sort-Object
 
                 Write-Host "`nSelect a Category:" -ForegroundColor Cyan
                 Write-Host "0. All Categories (exclude blanks)" -ForegroundColor Green
@@ -465,85 +459,61 @@ function IntuneDevices {
                 }
 
                 $catChoice = Read-Host "`nEnter number"
-                if ($catChoice -as [int] -and $catChoice -gt 0 -and $catChoice -le $categories.Count) {
-                    $categorySelected = $categories[$catChoice - 1]
-
-                    $filteredDevices = $filteredDevices | Where-Object {
-                        $catList = ($_.$categoryCol -split '[,;/]') | ForEach-Object { ($_ -as [string]).Trim() }
-                        $catList -contains $categorySelected
-                    }
+                if ($catChoice -eq "0") {
+                    $filteredDevices = $filteredDevices | Where-Object { -not [string]::IsNullOrWhiteSpace($_."$categoryCol") }
                 }
-
-                # Temp file after category filter
-                $filteredCsv = New-TempCsv -baseName "FilteredByCategory" -data $filteredDevices
-                $filteredDevices = Import-Csv $filteredCsv
-                Remove-Item $filteredCsv -Force  # Delete immediately
-                $tempFiles = $tempFiles | Where-Object { $_ -ne $filteredCsv }
+                elseif ($catChoice -as [int] -and $catChoice -gt 0 -and $catChoice -le $categories.Count) {
+                    $categorySelected = $categories[$catChoice - 1]
+                    # Use -like for performance on large sets
+                    $filteredDevices = $filteredDevices | Where-Object { $_."$categoryCol" -like "*$categorySelected*" }
+                }
 
                 # =============================
                 # MANUFACTURER SELECTION
                 # =============================
                 $manufacturerSelected = $null
-                $filteredManufacturers = $filteredDevices |
-                Where-Object { -not [string]::IsNullOrWhiteSpace($_.$manufacturerCol) } |
-                Select-Object -ExpandProperty $manufacturerCol -Unique |
-                Sort-Object
+                $uniqueManufacturers = $filteredDevices."$manufacturerCol" | Where-Object { $_ } | Select-Object -Unique | Sort-Object
 
                 Write-Host "`nSelect a Manufacturer:" -ForegroundColor Cyan
                 Write-Host "0. All Manufacturers" -ForegroundColor Green
-                for ($i = 0; $i -lt $filteredManufacturers.Count; $i++) {
-                    Write-Host ("{0}. {1}" -f ($i + 1), $filteredManufacturers[$i]) -ForegroundColor Green
+                for ($i = 0; $i -lt $uniqueManufacturers.Count; $i++) {
+                    Write-Host ("{0}. {1}" -f ($i + 1), $uniqueManufacturers[$i]) -ForegroundColor Green
                 }
 
                 $mfgChoice = Read-Host "`nEnter number"
-                if ($mfgChoice -as [int] -and $mfgChoice -gt 0 -and $mfgChoice -le $filteredManufacturers.Count) {
-                    $manufacturerSelected = $filteredManufacturers[$mfgChoice - 1]
-                    $filteredDevices = $filteredDevices | Where-Object { ($_.$manufacturerCol -as [string]) -eq $manufacturerSelected }
+                if ($mfgChoice -as [int] -and $mfgChoice -gt 0 -and $mfgChoice -le $uniqueManufacturers.Count) {
+                    $manufacturerSelected = $uniqueManufacturers[$mfgChoice - 1]
+                    $filteredDevices = $filteredDevices | Where-Object { $_."$manufacturerCol" -eq $manufacturerSelected }
                 }
-
-                # Temp file after manufacturer filter
-                $filteredCsv = New-TempCsv -baseName "FilteredByManufacturer" -data $filteredDevices
-                $filteredDevices = Import-Csv $filteredCsv
-                Remove-Item $filteredCsv -Force
-                $tempFiles = $tempFiles | Where-Object { $_ -ne $filteredCsv }
 
                 # =============================
                 # MODEL SELECTION
                 # =============================
                 $modelSelected = $null
-                $filteredModels = $filteredDevices |
-                Where-Object { -not [string]::IsNullOrWhiteSpace($_.$modelCol) } |
-                Select-Object -ExpandProperty $modelCol -Unique |
-                Sort-Object
+                $uniqueModels = $filteredDevices."$modelCol" | Where-Object { $_ } | Select-Object -Unique | Sort-Object
 
                 Write-Host "`nSelect a Model:" -ForegroundColor Cyan
                 Write-Host "0. All Models" -ForegroundColor Green
-                for ($i = 0; $i -lt $filteredModels.Count; $i++) {
-                    Write-Host ("{0}. {1}" -f ($i + 1), $filteredModels[$i]) -ForegroundColor Green
+                for ($i = 0; $i -lt $uniqueModels.Count; $i++) {
+                    Write-Host ("{0}. {1}" -f ($i + 1), $uniqueModels[$i]) -ForegroundColor Green
                 }
 
                 $modelChoice = Read-Host "`nEnter number"
-                if ($modelChoice -as [int] -and $modelChoice -gt 0 -and $modelChoice -le $filteredModels.Count) {
-                    $modelSelected = $filteredModels[$modelChoice - 1]
-                    $filteredDevices = $filteredDevices | Where-Object { ($_.$modelCol -as [string]) -eq $modelSelected }
+                if ($modelChoice -as [int] -and $modelChoice -gt 0 -and $modelChoice -le $uniqueModels.Count) {
+                    $modelSelected = $uniqueModels[$modelChoice - 1]
+                    $filteredDevices = $filteredDevices | Where-Object { $_."$modelCol" -eq $modelSelected }
                 }
-
-                # Temp file after model filter
-                $filteredCsv = New-TempCsv -baseName "FilteredByModel" -data $filteredDevices
-                $filteredDevices = Import-Csv $filteredCsv
-                Remove-Item $filteredCsv -Force
-                $tempFiles = $tempFiles | Where-Object { $_ -ne $filteredCsv }
 
                 # =============================
                 # DISPLAY RESULTS
                 # =============================
-                $header = "Devices by Manufacturer & Model"
+                $header = "Summary"
                 if ($categorySelected) { $header += " (Category: $categorySelected)" }
-                if ($manufacturerSelected) { $header += " (Manufacturer: $manufacturerSelected)" }
+                if ($manufacturerSelected) { $header += " (Mfg: $manufacturerSelected)" }
                 if ($modelSelected) { $header += " (Model: $modelSelected)" }
                 Write-Section $header
 
-                $grouped = $filteredDevices | Where-Object { $_.$manufacturerCol -and $_.$modelCol } | Group-Object -Property $manufacturerCol | Sort-Object Count -Descending
+                $grouped = $filteredDevices | Group-Object -Property $manufacturerCol | Sort-Object Count -Descending
                 foreach ($mfg in $grouped) {
                     Write-Host "`n$($mfg.Name)" -ForegroundColor Yellow
                     $rows = $mfg.Group | Group-Object -Property $modelCol | Sort-Object Count -Descending | ForEach-Object {
@@ -555,33 +525,18 @@ function IntuneDevices {
                 # =============================
                 # EXPORT
                 # =============================
-                Write-Host "`nExport these devices to CSV? (yes / no) [default: no]" -ForegroundColor Cyan
+                Write-Host "`nTotal records found: $($filteredDevices.Count)" -ForegroundColor Cyan
+                Write-Host "Export these devices to CSV? (yes / no) [default: no]" -ForegroundColor Cyan
                 $exportChoice = Read-Host "Enter choice"
                 if ($exportChoice -match '^(?i)y(es)?$') {
                     $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-                    $exportName = "Devices"
-                    if ($categorySelected) { $exportName += "_$categorySelected" }
-                    if ($manufacturerSelected) { $exportName += "_$manufacturerSelected" }
-                    if ($modelSelected) { $exportName += "_$modelSelected" }
+                    $exportName = "Filtered_Devices"
                     $outPath = Join-Path $selectedFolder "$exportName`_$timestamp.csv"
                     $filteredDevices | Export-Csv $outPath -NoTypeInformation -Encoding UTF8
                     Write-Host "Exported to $outPath" -ForegroundColor Green
                 }
-                else {
-                    Write-Host "Export skipped." -ForegroundColor DarkGray
-                }
-
 
                 Pause
-                # =============================
-                # CLEAN UP TEMP FILES
-                # =============================
-                foreach ($file in $tempFiles) {
-                    if (Test-Path $file) { Remove-Item $file -Force }
-                }
-                $tempFiles = @()
-
- 
              }
             4 {
                 $tempFolder = "C:\Temp"
