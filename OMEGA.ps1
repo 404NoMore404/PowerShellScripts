@@ -436,28 +436,33 @@ function IntuneDevices {
 
                 # ===== CATEGORY SELECTION =====
                 $categorySelected = $null
-                $categories = $filteredDevices |
-                Where-Object { -not [string]::IsNullOrWhiteSpace($_.$categoryCol) } |
-                Select-Object -ExpandProperty $categoryCol -Unique |
-                ForEach-Object { $_.Trim() } |
-                Sort-Object
+                if ($devices[0].PSObject.Properties.Name -contains $categoryCol) {
+                    $categories = $devices |
+                    Where-Object { $_.$categoryCol } |
+                    Select-Object -ExpandProperty $categoryCol -Unique |
+                    Sort-Object
 
-                Write-Host "`nSelect a Category:" -ForegroundColor Cyan
-                Write-Host "0. All Categories (exclude blanks)" -ForegroundColor Green
-                for ($i = 0; $i -lt $categories.Count; $i++) {
-                    Write-Host ("{0}. {1}" -f ($i + 1), $categories[$i]) -ForegroundColor Green
-                }
+                    if ($categories.Count -gt 1) {
+                        Write-Host "`nFilter by Category?" -ForegroundColor Cyan
+                        Write-Host "0. All Categories" -ForegroundColor Green
+                        for ($i = 0; $i -lt $categories.Count; $i++) {
+                            Write-Host ("{0}. {1}" -f ($i + 1), $categories[$i]) -ForegroundColor Green
+                        }
 
-                $catChoice = Read-Host "`nEnter number"
-
-                if ($catChoice -as [int] -and $catChoice -gt 0 -and $catChoice -le $categories.Count) {
-                    $categorySelected = $categories[$catChoice - 1]
-                    $filteredDevices = $filteredDevices | Where-Object {
-                        ($_.$categoryCol -split '[,;/]' | ForEach-Object { $_.Trim().ToLower() }) -contains $categorySelected.ToLower()
+                        $catChoice = Read-Host "`nEnter number"
+                        if ($catChoice -as [int] -and $catChoice -gt 0 -and $catChoice -le $categories.Count) {
+                            $categorySelected = $categories[$catChoice - 1]
+                            $devices = $devices | Where-Object { $_.$categoryCol -eq $categorySelected }
+                        }
+                        elseif ($catChoice -eq 0) {
+                            $categorySelected = $null
+                        }
+                        else {
+                            Write-Host "Invalid selection. Showing all categories." -ForegroundColor Yellow
+                            $categorySelected = $null
+                        }
                     }
                 }
-
-                Write-Host "Devices after Category filter: $($filteredDevices.Count)" -ForegroundColor Yellow
 
                 # ===== MANUFACTURER SELECTION =====
                 $manufacturerSelected = $null
