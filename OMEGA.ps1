@@ -441,23 +441,23 @@ function IntuneDevices {
                 $filteredDevices = $devices
 
 # ==========================================
-# CATEGORY SELECTION (Index-Based Filtering)
+# CATEGORY SELECTION (Regex-Safe Version)
 # ==========================================
 $categorySelected = $null
+$catIndex = 24 # Column 25
 
-# Intune CSVs often have 'Category' at Index 24 (Column 25)
-$catIndex = 24 
+Write-Host "Deep-scanning 18k rows for unique categories..." -ForegroundColor Gray
 
-Write-Host "Analyzing data by column index $catIndex..." -ForegroundColor Gray
-
-# 1. Get unique categories by looking at the specific property index
+# 1. Extract and Clean Categories
 $categories = $devices | ForEach-Object {
-    # Get all property values for this row and pick the one at our index
     $rowValues = $_.PSObject.Properties.Value
     $val = $rowValues[$catIndex]
     
-    if (-not [string]::IsNullOrWhiteSpace($val)) {
-        $val.ToString().Split(',;/').Trim() | Where-Object { $_ -ne "" }
+    if ($val -and -not [string]::IsNullOrWhiteSpace($val.ToString())) {
+        # Split, trim, and remove any non-printable characters
+        $val.ToString().Split(',;/') | ForEach-Object { 
+            $_.Trim() -replace '[^\x20-\x7E]', '' 
+        } | Where-Object { $_ -ne "" }
     }
 } | Select-Object -Unique | Sort-Object
 
@@ -471,30 +471,29 @@ $catChoice = Read-Host "`nEnter number"
 
 if ($catChoice -eq "0") {
     $filteredDevices = $devices | Where-Object { 
-        $val = $_.PSObject.Properties.Value[$catIndex]
-        -not [string]::IsNullOrWhiteSpace($val)
+        $v = $_.PSObject.Properties.Value[$catIndex]
+        -not [string]::IsNullOrWhiteSpace($v)
     }
 }
 elseif ($catChoice -as [int] -and $catChoice -gt 0 -and $catChoice -le $categories.Count) {
     $categorySelected = $categories[$catChoice - 1]
-    Write-Host "Filtering for: $categorySelected" -ForegroundColor Yellow
+    
+    # 2. THE FIX: Escape the string for Regex to handle special characters (like hyphens or dots)
+    $pattern = [regex]::Escape($categorySelected)
+    Write-Host "Applying Regex Filter: $pattern" -ForegroundColor Yellow
 
-    # 2. PERFORM THE FILTER
     $filteredDevices = $devices | Where-Object {
-        $rowValues = $_.PSObject.Properties.Value
-        $cellValue = $rowValues[$catIndex]
-        
+        $cellValue = $_.PSObject.Properties.Value[$catIndex]
         if ($null -ne $cellValue) {
-            # Check if the selection exists in the split/trimmed list of that cell
-            $cleanedList = ($cellValue.ToString().Split(',;/')).Trim()
-            $cleanedList -contains $categorySelected
+            # Check if the pattern exists anywhere in the string, case-insensitive
+            $cellValue.ToString() -match $pattern
         } else {
             $false
         }
     }
 }
 
-Write-Host "Records after Category filter: $($filteredDevices.Count)" -ForegroundColor Green
+Write-Host "Filter Complete. Remaining Records: $($filteredDevices.Count)" -ForegroundColor Green
 
                 # =============================
                 # MANUFACTURER SELECTION
