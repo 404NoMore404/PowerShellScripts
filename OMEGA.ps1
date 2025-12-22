@@ -480,24 +480,25 @@ function IntuneDevices {
                 Write-Host "Devices after Category filter: $($filteredDevices.Count)" -ForegroundColor Yellow
 
                 # ===== MANUFACTURER SELECTION =====
-                $manufacturerSelected = $null
-                $filteredManufacturers = $filteredDevices |
-                Where-Object { -not [string]::IsNullOrWhiteSpace($_.$manufacturerCol) } |
-                Select-Object -ExpandProperty $manufacturerCol -Unique |
-                Sort-Object
-
                 Write-Host "`nSelect a Manufacturer:" -ForegroundColor Cyan
                 Write-Host "0. All Manufacturers" -ForegroundColor Green
+
                 for ($i = 0; $i -lt $filteredManufacturers.Count; $i++) {
                     Write-Host ("{0}. {1}" -f ($i + 1), $filteredManufacturers[$i]) -ForegroundColor Green
                 }
 
                 $mfgChoice = Read-Host "`nEnter number"
 
-                if ($mfgChoice -as [int] -and $mfgChoice -gt 0 -and $mfgChoice -le $filteredManufacturers.Count) {
+                if (
+                    ($mfgChoice -as [int]) -and
+                    ([int]$mfgChoice -gt 0) -and
+                    ([int]$mfgChoice -le $filteredManufacturers.Count)
+                ) {
                     $manufacturerSelected = $filteredManufacturers[$mfgChoice - 1]
+
                     $filteredDevices = $filteredDevices | Where-Object {
-                        ([string]($_.$manufacturerCol)).Trim().ToLower() -eq $manufacturerSelected.ToLower()
+                        ([string]$_.$manufacturerCol).Trim().ToLower() -eq
+                        $manufacturerSelected.ToLower()
                     }
                 }
 
