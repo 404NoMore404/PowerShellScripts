@@ -428,50 +428,92 @@ function IntuneDevices {
                     if (-not ($devices[0].PSObject.Properties.Name -contains $col)) { Write-Host "Missing required column: $col" -ForegroundColor Red; Pause; return }
                 }
 
-                # ===== CATEGORY SELECTION =====
+# ===== CATEGORY SELECTION =====
                 $categorySelected = $null
                 if ($devices[0].PSObject.Properties.Name -contains $categoryCol) {
-                    $categories = $devices | Where-Object { $_.$categoryCol } | Select-Object -ExpandProperty $categoryCol -Unique | Sort-Object
-                    if ($categories.Count -gt 1) {
-                        Write-Host "`nSelect a Category:" -ForegroundColor Cyan
-                        Write-Host "0. All Categories" -ForegroundColor Green
-                        for ($i = 0; $i -lt $categories.Count; $i++) { Write-Host ("{0}. {1}" -f ($i + 1), $categories[$i]) -ForegroundColor Green }
-                        $catChoice = Read-Host "`nEnter number"
-                        if ($catChoice -as [int] -and $catChoice -gt 0 -and $catChoice -le $categories.Count) {
-                            $categorySelected = $categories[$catChoice - 1]
-                            # Filter devices by selected category
-                            $devices = $devices | Where-Object { $_.$categoryCol -eq $categorySelected }
-                        }
-                    }
-                }
 
-                # ===== CATEGORY SELECTION =====
-                $categorySelected = $null
-                if ($devices[0].PSObject.Properties.Name -contains $categoryCol) {
-                    $categories = $devices | Where-Object { $_.$categoryCol } | Select-Object -ExpandProperty $categoryCol -Unique | Sort-Object
+                    # Build category list ONLY from rows that actually have a category
+                    $categories = $devices |
+                    Where-Object { -not [string]::IsNullOrWhiteSpace($_.$categoryCol) } |
+                    ForEach-Object {
+                        $_.$categoryCol -split '[,;/]' | ForEach-Object { $_.Trim() }
+                    } |
+                    Sort-Object -Unique
+
                     Write-Host "`nSelect a Category:" -ForegroundColor Cyan
                     Write-Host "0. All Categories" -ForegroundColor Green
-                    for ($i = 0; $i -lt $categories.Count; $i++) { Write-Host ("{0}. {1}" -f ($i + 1), $categories[$i]) -ForegroundColor Green }
+                    for ($i = 0; $i -lt $categories.Count; $i++) {
+                        Write-Host ("{0}. {1}" -f ($i + 1), $categories[$i]) -ForegroundColor Green
+                    }
+
                     $catChoice = Read-Host "`nEnter number"
+
                     if ($catChoice -as [int] -and $catChoice -gt 0 -and $catChoice -le $categories.Count) {
                         $categorySelected = $categories[$catChoice - 1]
-                        # Filter devices by selected category
-                        $devices = $devices | Where-Object { $_.$categoryCol -eq $categorySelected }
+
+                        # HARD FILTER:
+                        # - Category must exist
+                        # - Category must contain selected value
+                        $devices = $devices | Where-Object {
+                            -not [string]::IsNullOrWhiteSpace($_.$categoryCol) -and
+                            (
+                                $_.$categoryCol -split '[,;/]' |
+                                ForEach-Object { $_.Trim().ToLower() }
+                            ) -contains $categorySelected.ToLower()
+                        }
                     }
                 }
 
                 # ===== MANUFACTURER SELECTION =====
                 $manufacturerSelected = $null
-                $filteredManufacturers = $devices | Where-Object { $_.$manufacturerCol -and $_.$manufacturerCol.Trim() -ne "" } | Select-Object -ExpandProperty $manufacturerCol -Unique | Sort-Object
+                $filteredManufacturers = $devices |
+                Where-Object { -not [string]::IsNullOrWhiteSpace($_.$manufacturerCol) } |
+                Select-Object -ExpandProperty $manufacturerCol -Unique |
+                ForEach-Object { $_.Trim() } |
+                Sort-Object
+
                 Write-Host "`nSelect a Manufacturer:" -ForegroundColor Cyan
                 Write-Host "0. All Manufacturers" -ForegroundColor Green
-                for ($i = 0; $i -lt $filteredManufacturers.Count; $i++) { Write-Host ("{0}. {1}" -f ($i + 1), $filteredManufacturers[$i]) -ForegroundColor Green }
+                for ($i = 0; $i -lt $filteredManufacturers.Count; $i++) {
+                    Write-Host ("{0}. {1}" -f ($i + 1), $filteredManufacturers[$i]) -ForegroundColor Green
+                }
+
                 $mfgChoice = Read-Host "`nEnter number"
+
                 if ($mfgChoice -as [int] -and $mfgChoice -gt 0 -and $mfgChoice -le $filteredManufacturers.Count) {
                     $manufacturerSelected = $filteredManufacturers[$mfgChoice - 1]
-                    # Filter devices by selected manufacturer (already filtered by category)
-                    $devices = $devices | Where-Object { $_.$manufacturerCol -eq $manufacturerSelected }
+
+                    # Filter devices by selected manufacturer (already category-filtered)
+                    $devices = $devices | Where-Object {
+                        $_.$manufacturerCol.Trim().ToLower() -eq $manufacturerSelected.ToLower()
+                    }
                 }
+
+                # ===== MODEL SELECTION =====
+                $modelSelected = $null
+                $filteredModels = $devices |
+                Where-Object { -not [string]::IsNullOrWhiteSpace($_.$modelCol) } |
+                Select-Object -ExpandProperty $modelCol -Unique |
+                ForEach-Object { $_.Trim() } |
+                Sort-Object
+
+                Write-Host "`nSelect a Model:" -ForegroundColor Cyan
+                Write-Host "0. All Models" -ForegroundColor Green
+                for ($i = 0; $i -lt $filteredModels.Count; $i++) {
+                    Write-Host ("{0}. {1}" -f ($i + 1), $filteredModels[$i]) -ForegroundColor Green
+                }
+
+                $modelChoice = Read-Host "`nEnter number"
+
+                if ($modelChoice -as [int] -and $modelChoice -gt 0 -and $modelChoice -le $filteredModels.Count) {
+                    $modelSelected = $filteredModels[$modelChoice - 1]
+
+                    # Filter devices by selected model (already category + manufacturer filtered)
+                    $devices = $devices | Where-Object {
+                        $_.$modelCol.Trim().ToLower() -eq $modelSelected.ToLower()
+                    }
+                }
+
 
                 # ===== MODEL SELECTION =====
                 $modelSelected = $null
