@@ -806,3 +806,110 @@ do {
     }
 }
 while ($true)
+
+
+
+
+#Region DeviceError Menu Start
+
+$script:DeviceCache = $null
+$script:DeviceCacheTime = $null
+#Getting all devices 
+function Get-AllManagedDevices {
+
+    Write-Host "Pulling devices from Graph..." -ForegroundColor Cyan
+
+    $allDevices = @()
+    $Uri = "https://graph link specific to my company"
+
+    $devices = Invoke-MgGraphRequest -Uri $Uri -Method GET
+    $allDevices += $devices.value
+
+    while ($devices.'@odata.nextLink') {
+        $devices = Invoke-MgGraphRequest -Uri $devices.'@odata.nextLink' -Method GET
+        $allDevices += $devices.value
+    }
+
+    $script:DeviceCache     = $allDevices
+    $script:DeviceCacheTime = Get-Date
+
+    Write-Host "Device pull complete ($($allDevices.Count) devices)." -ForegroundColor Green
+}
+#Verifying the devicecache has information in it.
+function Test-DeviceCache {
+    if (-not $script:DeviceCache) { return $false }
+    if ($script:DeviceCache.Count -eq 0) { return $false }
+    if (-not $script:DeviceCacheTime) { return $false }
+    return $true
+}
+
+function DeviceError {
+    do {
+        # Dynamic Footer 
+        if ($script:DeviceCacheTime) {
+            $footer = "Last device pull: $($script:DeviceCacheTime)"
+        }
+        else {
+            $footer = "Devices have NOT been pulled yet"
+        }
+        # Menu options
+        $options = @(
+            "Menu 1",
+            "Menu 2",
+            "View Device Data (Requires Pull)",
+            "Pull / Refresh Devices",
+            "Back to Main Menu"
+        )
+        # Disable option 3 if no cache
+        $disabledOptions = @()
+        if (-not (Test-DeviceCache)) {
+            $disabledOptions += 3
+        }
+        $choice = Show-Menu `
+            -Title "Device Error Menu" `
+            -Options $options `
+            -DisabledOptions $disabledOptions `
+            -Footer $footer `
+            -Breadcrumbs @("Main Menu", "Device Error")
+
+        switch ($choice) {
+            1 {
+                # Menu 1 logic
+            }
+            2 {
+                # Menu 2 logic
+            }
+            3 {
+                # SAFE GUARD (extra protection)
+                if (-not (Test-DeviceCache)) {
+                    Write-Host "Devices have not been pulled yet." -ForegroundColor Yellow
+                    Start-Sleep 1
+                    break
+                }
+                # Example usage
+                $deviceName = Read-Host "Enter the device name to search for"
+
+                # Filter cache for matching device name (partial match with '*')
+                $matchedDevices = $script:DeviceCache | Where-Object {
+                    $_.deviceName -like "*$deviceName*"
+                }
+
+                # Display all properties of the matched devices
+                if ($matchedDevices) {
+                    $matchedDevices | Format-List *
+                }
+                else {
+                    Write-Host "No devices found matching '$deviceName'" -ForegroundColor Yellow
+                }
+
+            }
+            4 {
+                Get-AllManagedDevices
+                Start-Sleep 1
+            }
+            5 { return }
+        }
+
+    } while ($true)
+}
+#Region DeviceError Menu Stop
