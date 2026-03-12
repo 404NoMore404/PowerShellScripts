@@ -405,6 +405,120 @@ Write-ReportItem '>' "Modified Files  : $($modifiedFiles.Count)" $(if ($modified
 Write-ReportItem '>' "Log saved to    : $script:LogPath" 'DarkGray'
 
 Write-Host ""
+
+Write-Host ""
 Write-Host "  ════════════════════════════════════════════════════════════" -ForegroundColor DarkCyan
-Write-Host "  Report complete. Press Enter to exit." -ForegroundColor DarkGray
+
+# ── Save report prompt ────────────────────────────────────────────────────────
+Write-Host ""
+Write-Host "  Save a copy of this report to a text file?" -ForegroundColor White
+Write-Host "  [Y] Yes (default)   [N] No  — then press Enter" -ForegroundColor DarkGray
+Write-Host ""
+Write-Host "  Choice > " -ForegroundColor White -NoNewline
+$saveChoice = (Read-Host).Trim()
+if ([string]::IsNullOrEmpty($saveChoice)) { $saveChoice = 'Y' }
+
+if ($saveChoice -match '^[Yy]') {
+
+    # Build a clean default filename: AppName_YYYYMMDD_InstallReport.txt
+    $safeName    = ($InstallerName -replace '\.[^.]+$', '') -replace '[\\/:*?"<>|]', '_'
+    $dateStamp   = Get-Date -Format 'yyyyMMdd'
+    $defaultName = "${safeName}_${dateStamp}_InstallReport.txt"
+
+    Add-Type -AssemblyName System.Windows.Forms | Out-Null
+
+    $saveDialog                  = New-Object System.Windows.Forms.SaveFileDialog
+    $saveDialog.Title            = "Save Installation Report"
+    $saveDialog.Filter           = "Text Files (*.txt)|*.txt|All Files (*.*)|*.*"
+    $saveDialog.DefaultExt       = "txt"
+    $saveDialog.FileName         = $defaultName
+    $saveDialog.InitialDirectory = "$env:USERPROFILE\Desktop"
+
+    $owner         = New-Object System.Windows.Forms.Form
+    $owner.TopMost = $true
+    $dialogResult  = $saveDialog.ShowDialog($owner)
+    $owner.Dispose()
+
+    if ($dialogResult -eq [System.Windows.Forms.DialogResult]::OK) {
+        $savePath    = $saveDialog.FileName
+        $reportLines = [System.Collections.Generic.List[string]]::new()
+
+        $reportLines.Add("WATCH-INSTALL v1.3 - INSTALLATION REPORT")
+        $reportLines.Add("Generated  : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')")
+        $reportLines.Add("Installer  : $InstallerPath")
+        $reportLines.Add("Arguments  : $(if ($Arguments) { $Arguments } else { '(none)' })")
+        $reportLines.Add("Exit Code  : $exitCode  ($exitMeaning)")
+        $reportLines.Add("IME Log    : $script:LogPath")
+        $reportLines.Add("")
+        $reportLines.Add(('-' * 64))
+
+        # Registry
+        $reportLines.Add("")
+        $reportLines.Add("REGISTRY - NEW UNINSTALL KEYS  ($($newRegKeys.Count) found)")
+        $reportLines.Add(('-' * 64))
+        if ($newRegKeys.Count -gt 0) {
+            foreach ($key in $newRegKeys) {
+                $kd = $regAfter[$key]
+                $reportLines.Add("  KEY : $key")
+                $kd.GetValueNames() | ForEach-Object {
+                    $reportLines.Add(("  {0,-22} = {1}" -f $_, $kd.GetValue($_)))
+                }
+                $reportLines.Add("")
+            }
+        } else {
+            $reportLines.Add("  (none detected)")
+            $reportLines.Add("")
+        }
+
+        # New files
+        $reportLines.Add("FILES - NEW FILES IN NEW DIRECTORIES  ($($newFiles.Count) found)")
+        $reportLines.Add(('-' * 64))
+        if ($newFiles.Count -gt 0) {
+            $newFiles | Group-Object -Property { Split-Path $_ -Parent } | ForEach-Object {
+                $reportLines.Add("  [DIR] $($_.Name)")
+                $_.Group | ForEach-Object { $reportLines.Add("        $(Split-Path $_ -Leaf)") }
+                $reportLines.Add("")
+            }
+        } else {
+            $reportLines.Add("  (none detected)")
+            $reportLines.Add("")
+        }
+
+        # Modified files
+        $reportLines.Add("FILES - MODIFIED FILES IN EXISTING DIRECTORIES  ($($modifiedFiles.Count) found)")
+        $reportLines.Add(('-' * 64))
+        if ($modifiedFiles.Count -gt 0) {
+            $modifiedFiles | Group-Object -Property { Split-Path $_ -Parent } | ForEach-Object {
+                $reportLines.Add("  [MOD] $($_.Name)")
+                $_.Group | ForEach-Object { $reportLines.Add("        $(Split-Path $_ -Leaf)") }
+                $reportLines.Add("")
+            }
+        } else {
+            $reportLines.Add("  (none detected)")
+            $reportLines.Add("")
+        }
+
+        # Summary
+        $reportLines.Add("SUMMARY")
+        $reportLines.Add(('-' * 64))
+        $reportLines.Add("  Installer       : $InstallerName")
+        $reportLines.Add("  Arguments       : $(if ($Arguments) { $Arguments } else { '(none)' })")
+        $reportLines.Add("  Exit Code       : $exitCode  ($exitMeaning)")
+        $reportLines.Add("  New Reg Keys    : $($newRegKeys.Count)")
+        $reportLines.Add("  New Files       : $($newFiles.Count)")
+        $reportLines.Add("  Modified Files  : $($modifiedFiles.Count)")
+        $reportLines.Add("  IME Log         : $script:LogPath")
+
+        $reportLines | Set-Content -Path $savePath -Encoding UTF8 -ErrorAction Stop
+        Write-Host ""
+        Write-Host "  OK  Report saved to: $savePath" -ForegroundColor Green
+        Write-Log "Report saved to: $savePath"
+    } else {
+        Write-Host ""
+        Write-Host "  Save cancelled." -ForegroundColor DarkGray
+    }
+}
+
+Write-Host ""
+Write-Host "  Press Enter to exit." -ForegroundColor DarkGray
 Read-Host | Out-Null
