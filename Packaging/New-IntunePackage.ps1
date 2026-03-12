@@ -751,7 +751,7 @@ Function Main {
         Write-Host "  Supported types: .exe  .msi  .msp" -ForegroundColor DarkGray
         Write-Host ""
 
-        $PickedPath = Show-FilePicker -Title "Select Installer" -Filter "Installer Files (*.exe;*.msi;*.msp)|*.exe;*.msi;*.msp|All Files (*.*)|*.*" -InitialDirectory "C:\"
+        $PickedPath = Show-FilePicker -Title "Select Installer" -Filter "Installer Files (*.exe;*.msi;*.msp)|*.exe;*.msi;*.msp|All Files (*.*)|*.*" -InitialDirectory ([Environment]::GetFolderPath("UserProfile") + "\Downloads")
 
         if ([string]::IsNullOrWhiteSpace($PickedPath)) {
             Write-Host "  [!] No file selected." -ForegroundColor Yellow
@@ -1108,36 +1108,14 @@ Function Main {
     # STEP 6 -- Requirements
     #######################################################################################
 
-    Write-Section "STEP 6 of 7 -- REQUIREMENTS" "Minimum OS and architecture for Intune assignment"
+    Write-Section "STEP 6 of 7 -- REQUIREMENTS" "Setting standard requirements"
+
+    $Pkg.MinOS        = "Windows 11 21H2 (22000)"
+    $Pkg.Architecture = "x64"
 
     Write-Host ""
-    Write-Host "  Minimum OS version:" -ForegroundColor Cyan
-    Write-Host "    [1]  Windows 10 1903  (build 18362)  -- broad compatibility" -ForegroundColor White
-    Write-Host "    [2]  Windows 10 2004  (build 19041)" -ForegroundColor White
-    Write-Host "    [3]  Windows 11 21H2  (build 22000)  -- Windows 11 only" -ForegroundColor White
-    Write-Host "    [4]  Windows 11 22H2  (build 22621)" -ForegroundColor White
-    $OSPick = (Read-Host "  Choice [1-4, default 1]").Trim()
-    $MinOS  = switch ($OSPick) {
-        "2" { "Windows 10 2004 (19041)" }
-        "3" { "Windows 11 21H2 (22000)" }
-        "4" { "Windows 11 22H2 (22621)" }
-        default { "Windows 10 1903 (18362)" }
-    }
-
-    Write-Host ""
-    Write-Host "  Architecture:" -ForegroundColor Cyan
-    Write-Host "    [1]  x64 only  (default -- covers most modern devices)" -ForegroundColor White
-    Write-Host "    [2]  x86 only" -ForegroundColor White
-    Write-Host "    [3]  x64 and x86  (both)" -ForegroundColor White
-    $ArchPick    = (Read-Host "  Choice [1-3, default 1]").Trim()
-    $Architecture = switch ($ArchPick) {
-        "2" { "x86" }
-        "3" { "x64, x86" }
-        default { "x64" }
-    }
-
-    $Pkg.MinOS        = $MinOS
-    $Pkg.Architecture = $Architecture
+    Write-Host "  Min OS       : $($Pkg.MinOS)" -ForegroundColor White
+    Write-Host "  Architecture : $($Pkg.Architecture)" -ForegroundColor White
 
     #######################################################################################
     # STEP 7 -- Build Package
