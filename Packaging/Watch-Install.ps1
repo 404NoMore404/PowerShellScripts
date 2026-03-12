@@ -7,9 +7,26 @@
 # Usage    : Right-click → "Run with PowerShell"  (self-elevates automatically)
 #            OR: .\Watch-Install.ps1
 #
+# Pair with: Watch-Uninstall.ps1, Compare-WatchReports.ps1
+#
 # Author   : [CHANGE ME] - Your Name / Team Name
-# Version  : 1.5
+# Version  : 1.6
 # Changelog:
+#   1.6 - Fixed two bugs that prevented the JSON data file from being produced
+#         correctly:
+#         (1) $exitMeaning was referenced in the JSON build block before the
+#             switch statement that defines it had run, resulting in a null
+#             ExitMeaning field in every output file. The switch is now at the
+#             top of the post-install analysis region so it is always defined
+#             before anything consumes it.
+#         (2) There were two separate, conflicting JSON-build-and-save blocks
+#             with different schemas ($installRecord / $watchInstallerFile and
+#             $installJson / $jsonSavePath) and two different filename-
+#             sanitisation rules, producing duplicate files with inconsistent
+#             field names. Both blocks have been removed and replaced with a
+#             single canonical JSON build using the $installJson / $jsonSavePath
+#             pattern, placed once — after $exitMeaning is defined — before the
+#             console report renders.
 #   1.5 - Auto-saves Watch_Installer_<AppName>.json next to the installer exe
 #         after every run. JSON contains app name, version, publisher, exit
 #         code, all new registry keys with full value data, new files list,
@@ -50,9 +67,9 @@
 # ==============================================================================
 # REGION: SELF-ELEVATION
 # ==============================================================================
-$currentUser    = [Security.Principal.WindowsIdentity]::GetCurrent()
+$currentUser      = [Security.Principal.WindowsIdentity]::GetCurrent()
 $currentPrincipal = New-Object Security.Principal.WindowsPrincipal($currentUser)
-$isAdmin        = $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+$isAdmin          = $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
 if (-not $isAdmin) {
     Write-Host "`n  Not running as Administrator — relaunching elevated...`n" -ForegroundColor Yellow
@@ -85,7 +102,7 @@ function Show-Banner {
     Clear-Host
     Write-Host ""
     Write-Host "  ╔══════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
-    Write-Host "  ║           WATCH-INSTALL  v1.5  — Intune Packager         ║" -ForegroundColor Cyan
+    Write-Host "  ║           WATCH-INSTALL  v1.6  — Intune Packager         ║" -ForegroundColor Cyan
     Write-Host "  ║    Monitors registry + filesystem changes during install  ║" -ForegroundColor Cyan
     Write-Host "  ╚══════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
     Write-Host ""
@@ -104,7 +121,7 @@ function Select-InstallerFile {
     $dialog.Multiselect      = $false
 
     # Dummy owner form forces dialog to appear on top of the terminal
-    $owner        = New-Object System.Windows.Forms.Form
+    $owner         = New-Object System.Windows.Forms.Form
     $owner.TopMost = $true
 
     $result = $dialog.ShowDialog($owner)
@@ -218,8 +235,7 @@ Write-Host "  Arguments > " -ForegroundColor White -NoNewline
 $Arguments = (Read-Host).Trim()
 Write-Host ""
 
-# ── Step 3: Confirm ─────────────────────────────────────────────────────────
-# Box interior is 58 chars wide. "  │  {0,-56}│" = 2+1+2+56+1 = 62 total.
+# ── Step 3: Confirm ──────────────────────────────────────────────────────────
 $fileDisplay  = 'File      : ' + ($InstallerName -replace '(.{41}).+', '$1...')
 $argsDisplay  = 'Arguments : ' + $(if ($Arguments) { $Arguments } else { '(none - GUI mode)' })
 $watchDisplay = 'Watching  : Registry + Filesystem (always on)'
@@ -236,7 +252,7 @@ Write-Host "  Press Enter to start  |  Ctrl+C to cancel" -ForegroundColor DarkGr
 Read-Host | Out-Null
 
 # ── Step 4: Init log ─────────────────────────────────────────────────────────
-Write-Log "===== WATCH-INSTALL v1.5 STARTED ====="
+Write-Log "===== WATCH-INSTALL v1.6 STARTED ====="
 Write-Log "Installer : $InstallerPath"
 Write-Log "Arguments : $(if ($Arguments) { $Arguments } else { '(none)' })"
 Write-Log "Log File  : $script:LogPath"
@@ -339,77 +355,13 @@ foreach ($dir in $touchedDirs) {
 }
 
 # ==============================================================================
-# ==============================================================================
-# REGION: AUTO-SAVE WATCH_INSTALLER JSON
+# REGION: EXIT CODE LOOKUP
 # ------------------------------------------------------------------------------
-# Derives app name from registry DisplayName if found, else strips the installer
-# extension. Saves a machine-readable JSON data file next to the installer exe
-# so Watch-Uninstall.ps1 and Compare-WatchReports.ps1 can consume it.
+# FIX (v1.6): Moved here — above the JSON build — so $exitMeaning is always
+# defined before anything tries to write it into the output file. Previously
+# this switch ran inside the console report region, which meant the JSON block
+# above it used a null $exitMeaning on every run.
 # ==============================================================================
-
-# Derive app name: prefer registry DisplayName, fall back to installer filename
-$appDisplayName = $null
-$appVersion     = $null
-$appPublisher   = $null
-
-if ($newRegKeys.Count -gt 0) {
-    $firstKey       = $newRegKeys | Select-Object -First 1
-    $appDisplayName = $regAfter[$firstKey].GetValue('DisplayName')
-    $appVersion     = $regAfter[$firstKey].GetValue('DisplayVersion')
-    $appPublisher   = $regAfter[$firstKey].GetValue('Publisher')
-}
-if (-not $appDisplayName) {
-    $appDisplayName = $InstallerName -replace '\.[^.]+$', ''
-}
-
-$safeAppName      = $appDisplayName -replace '[\\/:*?"<>|\s]', '_'
-$watchInstallerDir  = Split-Path $InstallerPath -Parent
-$watchInstallerFile = Join-Path $watchInstallerDir "Watch_Installer_${safeAppName}.json"
-
-# Build registry data hashtable (all values stringified for safe JSON serialisation)
-$regDataExport = @{}
-foreach ($key in $newRegKeys) {
-    $kd        = $regAfter[$key]
-    $keyValues = [ordered]@{}
-    foreach ($valName in $kd.GetValueNames()) {
-        $keyValues[$valName] = "$($kd.GetValue($valName))"
-    }
-    $regDataExport[$key] = $keyValues
-}
-
-$installRecord = [ordered]@{
-    Schema           = 'WatchInstall/1.0'
-    AppName          = $appDisplayName
-    AppVersion       = "$appVersion"
-    Publisher        = "$appPublisher"
-    InstallerFile    = $InstallerName
-    InstallerPath    = $InstallerPath
-    InstallDate      = (Get-Date -Format 'yyyy-MM-dd')
-    InstallTimestamp = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
-    Arguments        = $Arguments
-    ExitCode         = $exitCode
-    ExitMeaning      = $exitMeaning
-    RegistryKeysAdded = @($newRegKeys)
-    RegistryData      = $regDataExport
-    NewFiles          = @($newFiles)
-    ModifiedFiles     = @($modifiedFiles)
-}
-
-try {
-    $installRecord | ConvertTo-Json -Depth 10 | Set-Content -Path $watchInstallerFile -Encoding UTF8 -ErrorAction Stop
-    Write-Log "Watch_Installer data saved to: $watchInstallerFile"
-}
-catch {
-    Write-Log "Failed to save Watch_Installer JSON: $_" 'WARN'
-}
-
-# REGION: FULL CONSOLE REPORT
-# ==============================================================================
-Show-Banner
-Write-ReportHeader "INSTALLATION REPORT  —  $InstallerName"
-
-# ── Exit code ─────────────────────────────────────────────────────────────────
-Write-ReportSection "EXIT CODE"
 $exitMeaning = switch ($exitCode) {
     0    { 'Success' }
     1    { 'General error' }
@@ -427,6 +379,110 @@ $exitMeaning = switch ($exitCode) {
     default { 'Unknown — consult installer documentation' }
 }
 $codeColor = if ($exitCode -in @(0, 3010, 1641)) { 'Green' } else { 'Red' }
+
+# ==============================================================================
+# REGION: AUTO-SAVE WATCH_INSTALLER JSON
+# ------------------------------------------------------------------------------
+# FIX (v1.6): The original script had two separate, conflicting JSON-build
+# blocks with different schemas and different filename-sanitisation rules,
+# producing duplicate files with inconsistent field names. Both have been
+# removed and replaced with this single canonical block.
+#
+# Filename rule: strip all characters that are not letters, digits, or
+# underscores. Spaces and specials become underscores. This produces the same
+# filename whether called from this script or from Watch-Uninstall.ps1 /
+# Compare-WatchReports.ps1, as long as they all derive the name from the same
+# DisplayName value.
+#
+# The JSON is written unconditionally (no prompt) so downstream scripts always
+# have a data file to consume.
+# ==============================================================================
+
+# Derive app name: prefer registry DisplayName, fall back to installer filename
+$appDisplayName = $null
+$appVersion     = $null
+$appPublisher   = $null
+
+if ($newRegKeys.Count -gt 0) {
+    $firstKey       = $newRegKeys | Select-Object -First 1
+    $appDisplayName = $regAfter[$firstKey].GetValue('DisplayName')
+    $appVersion     = $regAfter[$firstKey].GetValue('DisplayVersion')
+    $appPublisher   = $regAfter[$firstKey].GetValue('Publisher')
+}
+if (-not $appDisplayName) {
+    $appDisplayName = $InstallerName -replace '\.[^.]+$', ''
+}
+
+# Single sanitisation rule used everywhere: non-alphanumeric → underscore,
+# collapse runs of underscores, trim leading/trailing underscores.
+$safeAppName  = ($appDisplayName -replace '[^a-zA-Z0-9]+', '_').Trim('_')
+$jsonSavePath = Join-Path (Split-Path $InstallerPath -Parent) "Watch_Installer_${safeAppName}.json"
+
+# Build registry key objects — all values stringified for safe JSON serialisation
+$regKeyObjects = [System.Collections.Generic.List[object]]::new()
+foreach ($key in $newRegKeys) {
+    $kd   = $regAfter[$key]
+    $vals = [ordered]@{}
+    foreach ($valName in $kd.GetValueNames()) {
+        $vals[$valName] = "$($kd.GetValue($valName))"
+    }
+    $regKeyObjects.Add([PSCustomObject]@{ Path = $key; Values = $vals })
+}
+
+# Build AppInfo from first new registry key (if any)
+$appInfoObj = [PSCustomObject]@{
+    DisplayName     = ''
+    DisplayVersion  = ''
+    Publisher       = ''
+    InstallLocation = ''
+    UninstallString = ''
+}
+if ($newRegKeys.Count -gt 0) {
+    $kd = $regAfter[$newRegKeys[0]]
+    $appInfoObj = [PSCustomObject]@{
+        DisplayName     = "$($kd.GetValue('DisplayName'))"
+        DisplayVersion  = "$($kd.GetValue('DisplayVersion'))"
+        Publisher       = "$($kd.GetValue('Publisher'))"
+        InstallLocation = "$($kd.GetValue('InstallLocation'))"
+        UninstallString = "$($kd.GetValue('UninstallString'))"
+    }
+}
+
+$installJson = [PSCustomObject]@{
+    Type        = 'Install'
+    GeneratedAt = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+    Meta        = [PSCustomObject]@{
+        ScriptVersion = '1.6'
+        InstallerPath = $InstallerPath
+        InstallerName = $InstallerName
+        AppName       = $safeAppName
+        Arguments     = $Arguments
+        ExitCode      = $exitCode
+        ExitMeaning   = $exitMeaning
+        IMELog        = $script:LogPath
+    }
+    AppInfo           = $appInfoObj
+    RegistryKeysAdded = @($regKeyObjects)
+    NewFiles          = @($newFiles)
+    ModifiedFiles     = @($modifiedFiles)
+}
+
+try {
+    $installJson | ConvertTo-Json -Depth 10 |
+        Set-Content -Path $jsonSavePath -Encoding UTF8 -ErrorAction Stop
+    Write-Log "Watch data file saved: $jsonSavePath"
+} catch {
+    Write-Log "Watch data file save failed: $_" 'ERROR'
+}
+
+# ==============================================================================
+# REGION: FULL CONSOLE REPORT
+# ==============================================================================
+Show-Banner
+Write-ReportHeader "INSTALLATION REPORT  —  $InstallerName"
+
+# ── Exit code ─────────────────────────────────────────────────────────────────
+Write-ReportSection "EXIT CODE"
 Write-ReportItem '>' "Exit Code  : $exitCode" $codeColor
 Write-ReportItem '>' "Meaning    : $exitMeaning" $codeColor
 
@@ -497,84 +553,14 @@ Write-ReportItem '>' "New Reg Keys    : $($newRegKeys.Count)" $(if ($newRegKeys.
 Write-ReportItem '>' "New Files       : $($newFiles.Count)" $(if ($newFiles.Count -gt 0) { 'Green' } else { 'Yellow' })
 Write-ReportItem '>' "Modified Files  : $($modifiedFiles.Count)" $(if ($modifiedFiles.Count -gt 0) { 'Cyan' } else { 'DarkGray' })
 Write-ReportItem '>' "Log saved to    : $script:LogPath" 'DarkGray'
-Write-ReportItem '>' "Watch data file : $watchInstallerFile" 'DarkGray'
-
-# ── Auto-save structured JSON data file next to installer ────────────────────
-# AppName: prefer registry DisplayName (spaces/specials stripped), else filename.
-$jsonAppName = if ($newRegKeys.Count -gt 0) {
-    $dn = $regAfter[$newRegKeys[0]].GetValue('DisplayName')
-    if ($dn) { $dn -replace '[^a-zA-Z0-9]', '' }
-    else      { ($InstallerName -replace '\.[^.]+$','') -replace '[^a-zA-Z0-9]','' }
-} else {
-    ($InstallerName -replace '\.[^.]+$','') -replace '[^a-zA-Z0-9]',''
-}
-
-$jsonFileName = "Watch_Installer_$jsonAppName.json"
-$jsonSavePath = Join-Path (Split-Path $InstallerPath -Parent) $jsonFileName
-
-# Build registry key objects
-$regKeyObjects = @()
-foreach ($key in $newRegKeys) {
-    $kd   = $regAfter[$key]
-    $vals = @{}
-    $kd.GetValueNames() | ForEach-Object { $vals[$_] = "$($kd.GetValue($_))" }
-    $regKeyObjects += [PSCustomObject]@{ Path = $key; Values = $vals }
-}
-
-# Build AppInfo from first new registry key (if any)
-$appInfoObj = [PSCustomObject]@{
-    DisplayName     = ''
-    DisplayVersion  = ''
-    Publisher       = ''
-    InstallLocation = ''
-    UninstallString = ''
-}
-if ($newRegKeys.Count -gt 0) {
-    $kd = $regAfter[$newRegKeys[0]]
-    $appInfoObj = [PSCustomObject]@{
-        DisplayName     = "$($kd.GetValue('DisplayName'))"
-        DisplayVersion  = "$($kd.GetValue('DisplayVersion'))"
-        Publisher       = "$($kd.GetValue('Publisher'))"
-        InstallLocation = "$($kd.GetValue('InstallLocation'))"
-        UninstallString = "$($kd.GetValue('UninstallString'))"
-    }
-}
-
-$installJson = [PSCustomObject]@{
-    Type        = 'Install'
-    GeneratedAt = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
-    Meta        = [PSCustomObject]@{
-        ScriptVersion = '1.5'
-        InstallerPath = $InstallerPath
-        InstallerName = $InstallerName
-        AppName       = $jsonAppName
-        Arguments     = $Arguments
-        ExitCode      = $exitCode
-        ExitMeaning   = $exitMeaning
-        IMELog        = $script:LogPath
-    }
-    AppInfo              = $appInfoObj
-    RegistryKeysAdded    = $regKeyObjects
-    NewFiles             = @($newFiles)
-    ModifiedFiles        = @($modifiedFiles)
-}
-
-try {
-    $installJson | ConvertTo-Json -Depth 10 |
-        Set-Content -Path $jsonSavePath -Encoding UTF8 -ErrorAction Stop
-    Write-ReportItem '>' "Data file       : $jsonSavePath" 'DarkGray'
-    Write-Log "Watch data file saved: $jsonSavePath"
-} catch {
-    Write-ReportItem '!' "Data file save failed: $_" 'Red'
-    Write-Log "Watch data file save failed: $_" 'ERROR'
-}
-
-Write-Host ""
+Write-ReportItem '>' "Data file       : $jsonSavePath" 'DarkGray'
 
 Write-Host ""
 Write-Host "  ════════════════════════════════════════════════════════════" -ForegroundColor DarkCyan
 
-# ── Save report prompt ────────────────────────────────────────────────────────
+# ==============================================================================
+# REGION: OPTIONAL TEXT REPORT SAVE
+# ==============================================================================
 Write-Host ""
 Write-Host "  Save a copy of this report to a text file?" -ForegroundColor White
 Write-Host "  [Y] Yes (default)   [N] No  — then press Enter" -ForegroundColor DarkGray
@@ -585,7 +571,6 @@ if ([string]::IsNullOrEmpty($saveChoice)) { $saveChoice = 'Y' }
 
 if ($saveChoice -match '^[Yy]') {
 
-    # Build a clean default filename: AppName_YYYYMMDD_InstallReport.txt
     $safeName    = ($InstallerName -replace '\.[^.]+$', '') -replace '[\\/:*?"<>|]', '_'
     $dateStamp   = Get-Date -Format 'yyyyMMdd'
     $defaultName = "${safeName}_${dateStamp}_InstallReport.txt"
@@ -608,12 +593,13 @@ if ($saveChoice -match '^[Yy]') {
         $savePath    = $saveDialog.FileName
         $reportLines = [System.Collections.Generic.List[string]]::new()
 
-        $reportLines.Add("WATCH-INSTALL v1.5 - INSTALLATION REPORT")
+        $reportLines.Add("WATCH-INSTALL v1.6 - INSTALLATION REPORT")
         $reportLines.Add("Generated  : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')")
         $reportLines.Add("Installer  : $InstallerPath")
         $reportLines.Add("Arguments  : $(if ($Arguments) { $Arguments } else { '(none)' })")
         $reportLines.Add("Exit Code  : $exitCode  ($exitMeaning)")
         $reportLines.Add("IME Log    : $script:LogPath")
+        $reportLines.Add("Data File  : $jsonSavePath")
         $reportLines.Add("")
         $reportLines.Add(('-' * 64))
 
@@ -673,11 +659,17 @@ if ($saveChoice -match '^[Yy]') {
         $reportLines.Add("  New Files       : $($newFiles.Count)")
         $reportLines.Add("  Modified Files  : $($modifiedFiles.Count)")
         $reportLines.Add("  IME Log         : $script:LogPath")
+        $reportLines.Add("  Data File       : $jsonSavePath")
 
-        $reportLines | Set-Content -Path $savePath -Encoding UTF8 -ErrorAction Stop
-        Write-Host ""
-        Write-Host "  OK  Report saved to: $savePath" -ForegroundColor Green
-        Write-Log "Report saved to: $savePath"
+        try {
+            $reportLines | Set-Content -Path $savePath -Encoding UTF8 -ErrorAction Stop
+            Write-Host ""
+            Write-Host "  OK  Report saved to: $savePath" -ForegroundColor Green
+            Write-Log "Text report saved: $savePath"
+        } catch {
+            Write-Host "  ERROR  Could not save report: $_" -ForegroundColor Red
+            Write-Log "Text report save failed: $_" 'ERROR'
+        }
     } else {
         Write-Host ""
         Write-Host "  Save cancelled." -ForegroundColor DarkGray
