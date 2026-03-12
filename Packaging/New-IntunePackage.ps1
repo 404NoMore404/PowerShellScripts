@@ -659,7 +659,12 @@ $FlagBlock
 }
 
 Function Build-EscalationNotes {
-    param([hashtable]$Pkg, [System.Collections.Generic.List[string]]$Flags)
+    param(
+        [hashtable]$Pkg,
+        [System.Collections.Generic.List[string]]$Flags,
+        [System.Collections.Generic.List[object]]$InstallAttempts  = $null,
+        [System.Collections.Generic.List[object]]$UninstallAttempts = $null
+    )
     $DateStamp = Get-Date -Format "yyyy-MM-dd HH:mm"
 $Out = @"
 ###########################################################################################
@@ -678,6 +683,61 @@ $Out = @"
         $Num++
         $Out += "  [$Num]  $Flag`r`n`r`n"
     }
+
+    # Attach install verification attempt log if any attempts were made
+    if ($InstallAttempts -and $InstallAttempts.Count -gt 0) {
+        $Out += @"
+
+=======================================================================================
+  INSTALL VERIFICATION ATTEMPTS  ($($InstallAttempts.Count) total)
+=======================================================================================
+
+"@
+        foreach ($A in $InstallAttempts) {
+            $Status = if ($A.Success) { "PASS" } else { "FAIL" }
+            $Out += "  [$Status]  Args      : $($A.Args)`r`n"
+            $Out += "           Exit code  : $($A.ExitCode)  $(if($A.ExitCodeOk){'(clean)'}else{'(unexpected)'})`r`n"
+            $Out += "           Registry   : $(if($A.RegistryFound){'App FOUND -- install confirmed'}else{'App NOT found after install'})`r`n"
+            $Out += "           Source     : $($A.Source)`r`n"
+            $Out += "           Time       : $($A.Timestamp)`r`n"
+            if ($A.Error) { $Out += "           Error      : $($A.Error)`r`n" }
+            $Out += "`r`n"
+        }
+        $WorkingInstall = $InstallAttempts | Where-Object { $_.Success } | Select-Object -First 1
+        if ($WorkingInstall) {
+            $Out += "  WORKING ARGS: $($WorkingInstall.Args)`r`n`r`n"
+        } else {
+            $Out += "  NO WORKING ARGS FOUND -- manual investigation required.`r`n`r`n"
+        }
+    }
+
+    # Attach uninstall verification attempt log if any attempts were made
+    if ($UninstallAttempts -and $UninstallAttempts.Count -gt 0) {
+        $Out += @"
+
+=======================================================================================
+  UNINSTALL VERIFICATION ATTEMPTS  ($($UninstallAttempts.Count) total)
+=======================================================================================
+
+"@
+        foreach ($A in $UninstallAttempts) {
+            $Status = if ($A.Success) { "PASS" } else { "FAIL" }
+            $Out += "  [$Status]  Command    : $($A.Command)`r`n"
+            $Out += "           Exit code  : $($A.ExitCode)  $(if($A.ExitCodeOk){'(clean)'}else{'(unexpected)'})`r`n"
+            $Out += "           Registry   : $(if($A.RegistryGone){'App GONE -- removal confirmed'}else{'App STILL PRESENT after uninstall'})`r`n"
+            $Out += "           Source     : $($A.Source)`r`n"
+            $Out += "           Time       : $($A.Timestamp)`r`n"
+            if ($A.Error) { $Out += "           Error      : $($A.Error)`r`n" }
+            $Out += "`r`n"
+        }
+        $WorkingUninstall = $UninstallAttempts | Where-Object { $_.Success } | Select-Object -First 1
+        if ($WorkingUninstall) {
+            $Out += "  WORKING COMMAND: $($WorkingUninstall.Command)`r`n`r`n"
+        } else {
+            $Out += "  NO WORKING UNINSTALL FOUND -- manual investigation required.`r`n`r`n"
+        }
+    }
+
     $Out += @"
 
 =======================================================================================
@@ -698,9 +758,181 @@ $Out = @"
     User-context install  ->  Change Install behavior to User in Intune Program tab
     Null exit code        ->  Already handled in the install script -- verify via
                                detection script after deploy
+    Install args failed   ->  Use Process Monitor (procmon) during a manual install
+                               to capture the child processes and arguments used
+    Uninstall not found   ->  Check vendor support docs; try running the uninstaller
+                               manually from %AppData% or %LocalAppData% for user installs
 
 "@
     return $Out
+}
+
+
+###########################################################################################
+# INSTALL / UNINSTALL VERIFICATION HELPERS
+###########################################################################################
+
+# Returns an ordered list of arg combinations to auto-try for a given installer type.
+# First entry is always the primary suggestion; rest are fallback alternatives.
+Function Get-AlternativeArgs {
+    param([string]$InstallerType, [string]$PrimaryArgs)
+    $Alts = switch ($InstallerType) {
+        "MSI"               { @("/quiet /norestart", "/qn /norestart", "/passive /norestart", "/quiet", "/qn") }
+        "MSP"               { @("/quiet /norestart", "/qn /norestart") }
+        "EXE-Inno"          { @("/VERYSILENT /SUPPRESSMSGBOXES /NORESTART", "/SILENT /NORESTART", "/VERYSILENT /NORESTART", "/VERYSILENT", "/S") }
+        "EXE-NSIS"          { @("/S", "/S /NCRC", "/silent") }
+        "EXE-InstallShield" { @('/s /v"/qn /norestart"', '/s /v"/qb /norestart"', '/s /v"/qn"', "/s", "/SMS") }
+        "EXE-WiX"           { @("/quiet /norestart", "/quiet", "/passive /norestart", "/install /quiet") }
+        "EXE-Squirrel"      { @("--silent", "--silent --no-desktop-shortcut", "/S") }
+        default             { @("/S", "/s", "/silent", "/quiet", "--silent", "-s", "/VERYSILENT", "/S /NCRC") }
+    }
+    # Move primary to front, deduplicate
+    $All = @($PrimaryArgs) + ($Alts | Where-Object { $_ -ne $PrimaryArgs })
+    return $All | Select-Object -Unique
+}
+
+# Run a single install attempt, return a result object.
+Function Invoke-InstallAttempt {
+    param(
+        [PSCustomObject]$File,
+        [string]$InstallerType,
+        [string]$Args,
+        [string]$LogFolder,
+        [string]$AppNameHint
+    )
+    $Timestamp = Get-Date -Format "yyyy-MM-dd_HHmmss"
+    $ExitCode  = -9999
+    $ErrorMsg  = ""
+
+    try {
+        if ($InstallerType -eq "MSI" -or $InstallerType -eq "MSP") {
+            $Verb    = if ($InstallerType -eq "MSP") { "/p" } else { "/i" }
+            $MsiLog  = Join-Path $LogFolder "verify_msi_$Timestamp.log"
+            $FullArgs = "$Verb `"$($File.FullPath)`" $Args /l*v `"$MsiLog`""
+            $P = Start-Process msiexec.exe -ArgumentList $FullArgs -Wait -PassThru -NoNewWindow
+        } else {
+            $P = Start-Process $File.FullPath -ArgumentList $Args -Wait -PassThru -NoNewWindow
+        }
+        $ExitCode = if ($null -eq $P.ExitCode) { 0 } else { $P.ExitCode }
+    } catch {
+        $ErrorMsg = $_.Exception.Message
+    }
+
+    $ExitOk   = ($ExitCode -eq 0 -or $ExitCode -eq 3010 -or $ExitCode -eq 1641)
+    Start-Sleep -Seconds 4
+    $RegFound = (@(Get-InstalledApps -SearchTerm $AppNameHint)).Count -gt 0
+
+    return [PSCustomObject]@{
+        Phase         = "Install"
+        Source        = "Auto"
+        Args          = $Args
+        ExitCode      = $ExitCode
+        ExitCodeOk    = $ExitOk
+        RegistryFound = $RegFound
+        Success       = ($ExitOk -and $RegFound)
+        Error         = $ErrorMsg
+        Timestamp     = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+    }
+}
+
+# Run a single uninstall attempt against all matching DisplayName entries; return result.
+Function Invoke-UninstallAttempt {
+    param(
+        [string]$DisplayNameFilter,
+        [string]$UninstallCommand,
+        [string]$Method,
+        [string]$LogFolder,
+        [string]$AppNameHint
+    )
+    $Timestamp = Get-Date -Format "yyyy-MM-dd_HHmmss"
+    $ExitCode  = -9999
+    $ErrorMsg  = ""
+
+    $UninstallPaths = @(
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
+        "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
+    )
+
+    try {
+        if ($Method -eq "MSI" -and $UninstallCommand -match '\{[0-9A-Fa-f\-]{36}\}') {
+            $Guid    = ([regex]::Match($UninstallCommand, '\{[0-9A-Fa-f\-]{36}\}')).Value
+            $MsiLog  = Join-Path $LogFolder "verify_uninstall_msi_$Timestamp.log"
+            $P       = Start-Process msiexec.exe -ArgumentList "/x $Guid /quiet /norestart /l*v `"$MsiLog`"" -Wait -PassThru -NoNewWindow
+            $ExitCode = if ($null -eq $P.ExitCode) { 0 } else { $P.ExitCode }
+        } else {
+            # Dynamic scan -- same logic as the generated uninstall script
+            $Found = @()
+            foreach ($Path in $UninstallPaths) {
+                if (-not (Test-Path $Path)) { continue }
+                Get-ChildItem $Path -EA SilentlyContinue | ForEach-Object {
+                    $Prop = Get-ItemProperty $_.PsPath -EA SilentlyContinue
+                    if ($Prop.DisplayName -like $DisplayNameFilter) {
+                        $Found += [PSCustomObject]@{
+                            DisplayName     = $Prop.DisplayName
+                            PSChildName     = $_.PSChildName
+                            QuietUninstall  = $Prop.QuietUninstallString
+                            UninstallString = $Prop.UninstallString
+                        }
+                    }
+                }
+            }
+            if ($Found.Count -eq 0) {
+                return [PSCustomObject]@{ Phase="Uninstall"; Source="Auto"; Command=$UninstallCommand; ExitCode=0; ExitCodeOk=$true; RegistryGone=$true; Success=$true; Error="App not found -- already uninstalled?"; Timestamp=(Get-Date -Format "yyyy-MM-dd HH:mm:ss") }
+            }
+            foreach ($App in $Found) {
+                $Cmd = ""
+                if (-not [string]::IsNullOrWhiteSpace($App.QuietUninstall)) { $Cmd = $App.QuietUninstall }
+                elseif ($App.PSChildName -match '^\{[0-9A-Fa-f\-]{36}\}$') {
+                    $MsiLog = Join-Path $LogFolder "verify_uninstall_msi_$Timestamp.log"
+                    $P = Start-Process msiexec.exe -ArgumentList "/x $($App.PSChildName) /quiet /norestart /l*v `"$MsiLog`"" -Wait -PassThru -NoNewWindow
+                    $ExitCode = if ($null -eq $P.ExitCode) { 0 } else { $P.ExitCode }
+                    continue
+                }
+                elseif (-not [string]::IsNullOrWhiteSpace($App.UninstallString)) { $Cmd = $App.UninstallString + " /S" }
+                if ($Cmd) {
+                    if ($Cmd -match '^"([^"]+)"(.*)$') { $ExePath = $Matches[1]; $ExeArgs = $Matches[2].Trim() }
+                    else { $Parts = $Cmd -split ' ',2; $ExePath = $Parts[0]; $ExeArgs = if ($Parts.Count -gt 1) { $Parts[1] } else { "" } }
+                    $P = Start-Process $ExePath -ArgumentList $ExeArgs -Wait -PassThru -NoNewWindow
+                    $ExitCode = if ($null -eq $P.ExitCode) { 0 } else { $P.ExitCode }
+                }
+            }
+        }
+    } catch {
+        $ErrorMsg = $_.Exception.Message
+    }
+
+    $ExitOk = ($ExitCode -eq 0 -or $ExitCode -eq 3010 -or $ExitCode -eq 1641 -or $ExitCode -eq -9999)
+    Start-Sleep -Seconds 4
+    $RegGone = (@(Get-InstalledApps -SearchTerm $AppNameHint)).Count -eq 0
+
+    return [PSCustomObject]@{
+        Phase        = "Uninstall"
+        Source       = "Auto"
+        Command      = $UninstallCommand
+        ExitCode     = $ExitCode
+        ExitCodeOk   = $ExitOk
+        RegistryGone = $RegGone
+        Success      = $RegGone
+        Error        = $ErrorMsg
+        Timestamp    = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+    }
+}
+
+# Format attempt log as a readable string block for escalation notes.
+Function Format-AttemptLog {
+    param([System.Collections.Generic.List[object]]$Attempts)
+    $Lines = @()
+    foreach ($A in $Attempts) {
+        $Status = if ($A.Success) { "PASS" } else { "FAIL" }
+        if ($A.Phase -eq "Install") {
+            $Lines += "  [$Status]  Args: $($A.Args)  |  Exit: $($A.ExitCode)  |  Registry: $(if($A.RegistryFound){'Found'}else{'Not found'})  |  Source: $($A.Source)  |  $($A.Timestamp)"
+        } else {
+            $Lines += "  [$Status]  $($A.Command)  |  Exit: $($A.ExitCode)  |  Registry: $(if($A.RegistryGone){'Gone'}else{'Still present'})  |  Source: $($A.Source)  |  $($A.Timestamp)"
+        }
+        if ($A.Error) { $Lines += "         Error: $($A.Error)" }
+    }
+    return $Lines -join "`r`n"
 }
 
 ###########################################################################################
@@ -709,7 +941,9 @@ $Out = @"
 
 Function Main {
 
-    $script:EscalationFlags = [System.Collections.Generic.List[string]]::new()
+    $script:EscalationFlags   = [System.Collections.Generic.List[string]]::new()
+    $script:InstallAttempts   = [System.Collections.Generic.List[object]]::new()
+    $script:UninstallAttempts = [System.Collections.Generic.List[object]]::new()
     $Pkg = @{}
 
     Write-Banner "INTUNE PACKAGE BUILDER  v1.0"
@@ -895,6 +1129,145 @@ Function Main {
     $Pkg.RestartBehavior = $RestartBehavior
 
     #######################################################################################
+    # STEP 3b -- Verify Install (optional)
+    #######################################################################################
+
+    $script:InstallAttempts  = [System.Collections.Generic.List[object]]::new()
+    $script:InstallVerified  = $false
+    $script:WorkingInstallArgs = $InstallerInfo.SuggestedArgs
+
+    Write-Host ""
+    Write-Host "  Verify that the silent install actually works before packaging." -ForegroundColor DarkGray
+    Write-Host "  The tool will test the args now, then auto-try alternatives if needed." -ForegroundColor DarkGray
+    Write-Host ""
+
+    if (Read-YN "Test the install on this machine now?") {
+
+        # Ensure log folder exists for attempt logs
+        $VerifyLogFolder = Join-Path $env:TEMP "IntuneVerify_$SafeName"
+        New-Item -Path $VerifyLogFolder -ItemType Directory -Force | Out-Null
+
+        $ArgQueue = @(Get-AlternativeArgs -InstallerType $InstallerInfo.Type -PrimaryArgs $InstallerInfo.SuggestedArgs)
+        $AutoIndex = 0
+        $GaveUp    = $false
+
+        :VerifyLoop while ($true) {
+
+            # ── Auto-try phase ────────────────────────────────────────────────
+            if ($AutoIndex -lt $ArgQueue.Count) {
+                $CurrentArgs = $ArgQueue[$AutoIndex]
+                $AutoIndex++
+
+                $SourceLabel = if ($AutoIndex -eq 1) { "Suggested" } else { "Auto-alt $AutoIndex" }
+                Write-Host ""
+                Write-Host "  [$SourceLabel]  Testing args: $CurrentArgs" -ForegroundColor Cyan
+                Write-Host "  Running installer -- this may take a moment..." -ForegroundColor DarkGray
+
+                $Result = Invoke-InstallAttempt -File $SelectedFile -InstallerType $InstallerInfo.Type `
+                    -Args $CurrentArgs -LogFolder $VerifyLogFolder -AppNameHint $AppNameHint
+                $Result.Source = $SourceLabel
+                $script:InstallAttempts.Add($Result)
+
+                if ($Result.Success) {
+                    Write-Host "  [PASS]  Exit code $($Result.ExitCode) -- app found in registry." -ForegroundColor Green
+                    $script:InstallVerified   = $true
+                    $script:WorkingInstallArgs = $CurrentArgs
+                    $InstallerInfo.SuggestedArgs = $CurrentArgs
+                    $Pkg.InstallArgs = $CurrentArgs
+                    Write-Host "  Working args locked in: $CurrentArgs" -ForegroundColor Green
+                    break VerifyLoop
+                } elseif ($Result.ExitCodeOk -and -not $Result.RegistryFound) {
+                    Write-Host "  [WARN]  Exit code $($Result.ExitCode) OK but app NOT found in registry." -ForegroundColor Yellow
+                    Write-Host "         This could be a Squirrel/user-context installer or a reboot is needed." -ForegroundColor DarkGray
+                    if (Read-YN "  Accept this result anyway (exit code was clean)?" -DefaultNo) {
+                        $Result.Success = $true
+                        $script:InstallVerified    = $true
+                        $script:WorkingInstallArgs = $CurrentArgs
+                        $InstallerInfo.SuggestedArgs = $CurrentArgs
+                        $Pkg.InstallArgs = $CurrentArgs
+                        Write-Host "  Accepted. Working args: $CurrentArgs" -ForegroundColor Yellow
+                        break VerifyLoop
+                    }
+                    # Otherwise fall through and try next
+                } else {
+                    $Reason = if (-not $Result.ExitCodeOk) { "exit code $($Result.ExitCode)" } else { "app not found in registry" }
+                    Write-Host "  [FAIL]  Failed -- $Reason" -ForegroundColor Red
+                    if ($AutoIndex -lt $ArgQueue.Count) {
+                        Write-Host "  Auto-trying next combination..." -ForegroundColor DarkGray
+                    }
+                }
+
+            } else {
+                # ── All auto options exhausted -- ask user ────────────────────
+                Write-Host ""
+                Write-Host "  All $($ArgQueue.Count) auto-combinations have been tried without success." -ForegroundColor Yellow
+                Write-Host ""
+                Write-Host "  You can enter a custom argument string to try, or give up and escalate." -ForegroundColor Cyan
+                Write-Host "  If you give up, all attempts will be recorded in Escalation-Notes.txt." -ForegroundColor DarkGray
+                Write-Host ""
+
+                if (-not (Read-YN "Try a custom argument string?")) {
+                    $GaveUp = $true
+                    break VerifyLoop
+                }
+
+                Write-Host "  Common references:" -ForegroundColor DarkGray
+                Write-Host "    MSI/WiX          : /quiet /norestart" -ForegroundColor DarkGray
+                Write-Host "    Inno Setup        : /VERYSILENT /SUPPRESSMSGBOXES /NORESTART" -ForegroundColor DarkGray
+                Write-Host "    NSIS             : /S" -ForegroundColor DarkGray
+                Write-Host "    InstallShield    : /s /v`"/qn /norestart`"" -ForegroundColor DarkGray
+                Write-Host "    Generic EXE      : --silent  /silent  -s  /S /NCRC" -ForegroundColor DarkGray
+                Write-Host ""
+                $UserArgs = (Read-Host "  Enter args to try").Trim()
+                if ([string]::IsNullOrWhiteSpace($UserArgs)) { continue }
+
+                Write-Host ""
+                Write-Host "  Testing user args: $UserArgs" -ForegroundColor Cyan
+                Write-Host "  Running installer..." -ForegroundColor DarkGray
+
+                $Result = Invoke-InstallAttempt -File $SelectedFile -InstallerType $InstallerInfo.Type `
+                    -Args $UserArgs -LogFolder $VerifyLogFolder -AppNameHint $AppNameHint
+                $Result.Source = "UserEntered"
+                $script:InstallAttempts.Add($Result)
+
+                if ($Result.Success) {
+                    Write-Host "  [PASS]  Exit code $($Result.ExitCode) -- app found in registry." -ForegroundColor Green
+                    $script:InstallVerified    = $true
+                    $script:WorkingInstallArgs = $UserArgs
+                    $InstallerInfo.SuggestedArgs = $UserArgs
+                    $Pkg.InstallArgs = $UserArgs
+                    Write-Host "  Working args locked in: $UserArgs" -ForegroundColor Green
+                    break VerifyLoop
+                } else {
+                    $Reason = if (-not $Result.ExitCodeOk) { "exit code $($Result.ExitCode)" } else { "app not found in registry" }
+                    Write-Host "  [FAIL]  Failed -- $Reason" -ForegroundColor Red
+                    if (-not (Read-YN "  Try another custom combination?")) {
+                        $GaveUp = $true
+                        break VerifyLoop
+                    }
+                }
+            }
+        }
+
+        if ($GaveUp) {
+            $AttemptSummary = Format-AttemptLog -Attempts $script:InstallAttempts
+            Add-EscalationFlag "Install verification FAILED after $($script:InstallAttempts.Count) attempt(s). None of the tried arg combinations produced a successful install + registry confirmation. Manual investigation required.`r`n`r`n  Attempts:`r`n$AttemptSummary"
+            Write-Host ""
+            Write-Host "  Install could not be verified. All attempts logged to Escalation-Notes.txt." -ForegroundColor Yellow
+        } elseif ($script:InstallVerified) {
+            $FailedCount = ($script:InstallAttempts | Where-Object { -not $_.Success }).Count
+            if ($FailedCount -gt 0) {
+                Write-Host "  ($FailedCount failed attempt(s) before finding working args -- noted in summary)" -ForegroundColor DarkGray
+            }
+        }
+
+    } else {
+        Write-Host "  Skipping install verification -- args not confirmed by test." -ForegroundColor DarkGray
+        Add-EscalationFlag "Install args '$($InstallerInfo.SuggestedArgs)' were NOT verified by a live test. Validate on a test device before broad deployment."
+    }
+
+
+    #######################################################################################
     # STEP 4 -- Uninstall Configuration
     #######################################################################################
 
@@ -998,6 +1371,126 @@ Function Main {
     $Pkg.DisplayNameFilter    = $DisplayNameFilter
     $Pkg.UninstallRegPath     = $UninstallRegPath
     $Pkg.UninstallCommand     = if ($RegistryApps.Count -gt 0) { (Resolve-UninstallMethod -App $RegistryApps[0]).UninstallCommand } else { "Runtime discovery by DisplayName filter: $DisplayNameFilter" }
+
+    #######################################################################################
+    # STEP 4b -- Verify Uninstall (optional, only offered if app is currently installed)
+    #######################################################################################
+
+    $script:UninstallAttempts  = [System.Collections.Generic.List[object]]::new()
+    $script:UninstallVerified  = $false
+
+    $AppCurrentlyInstalled = (@(Get-InstalledApps -SearchTerm $AppNameHint)).Count -gt 0
+
+    if ($AppCurrentlyInstalled) {
+        Write-Host ""
+        Write-Host "  App is currently installed on this machine -- uninstall can be tested now." -ForegroundColor DarkGray
+        Write-Host ""
+
+        if (Read-YN "Test the uninstall on this machine now?") {
+
+            $VerifyLogFolder = Join-Path $env:TEMP "IntuneVerify_$SafeName"
+            New-Item -Path $VerifyLogFolder -ItemType Directory -Force | Out-Null
+
+            :UninstallLoop while ($true) {
+
+                Write-Host ""
+                Write-Host "  Running uninstall via DisplayName scan (filter: $DisplayNameFilter)..." -ForegroundColor Cyan
+
+                $UResult = Invoke-UninstallAttempt `
+                    -DisplayNameFilter $DisplayNameFilter `
+                    -UninstallCommand  $Pkg.UninstallCommand `
+                    -Method            $Pkg.UninstallMethod `
+                    -LogFolder         $VerifyLogFolder `
+                    -AppNameHint       $AppNameHint
+                $UResult.Source = "Auto"
+                $script:UninstallAttempts.Add($UResult)
+
+                if ($UResult.Success) {
+                    Write-Host "  [PASS]  App removed -- no longer found in registry." -ForegroundColor Green
+                    $script:UninstallVerified = $true
+                    break UninstallLoop
+                } else {
+                    if (-not $UResult.ExitCodeOk) {
+                        Write-Host "  [FAIL]  Uninstall exited with code $($UResult.ExitCode)." -ForegroundColor Red
+                    } else {
+                        Write-Host "  [FAIL]  Exit code OK but app still present in registry." -ForegroundColor Red
+                    }
+                    if ($UResult.Error) { Write-Host "         Error: $($UResult.Error)" -ForegroundColor Red }
+
+                    Write-Host ""
+                    Write-Host "  The uninstall script uses DisplayName-based discovery." -ForegroundColor DarkGray
+                    Write-Host "  If the auto-detected command isn't working, you can enter one manually." -ForegroundColor DarkGray
+                    Write-Host ""
+
+                    if (-not (Read-YN "Try a custom uninstall command?")) {
+                        $AttemptSummary = Format-AttemptLog -Attempts $script:UninstallAttempts
+                        Add-EscalationFlag "Uninstall verification FAILED after $($script:UninstallAttempts.Count) attempt(s). App remained in registry after each attempt.`r`n`r`n  Attempts:`r`n$AttemptSummary"
+                        Write-Host "  Uninstall could not be verified. Logged to Escalation-Notes.txt." -ForegroundColor Yellow
+                        break UninstallLoop
+                    }
+
+                    Write-Host "  Common patterns:" -ForegroundColor DarkGray
+                    Write-Host "    MSI  : msiexec.exe /x {GUID} /quiet /norestart" -ForegroundColor DarkGray
+                    Write-Host "    EXE  : `"C:\Program Files\App\uninstall.exe`" /S" -ForegroundColor DarkGray
+                    $CustomUCmd = (Read-Host "  Enter uninstall command").Trim()
+                    if ([string]::IsNullOrWhiteSpace($CustomUCmd)) { continue }
+
+                    Write-Host ""
+                    Write-Host "  Testing: $CustomUCmd" -ForegroundColor Cyan
+
+                    # Determine method for the custom command
+                    $CustomMethod = if ($CustomUCmd -match 'msiexec') { "MSI" } else { "EXE" }
+                    $UResult2 = Invoke-UninstallAttempt `
+                        -DisplayNameFilter $DisplayNameFilter `
+                        -UninstallCommand  $CustomUCmd `
+                        -Method            $CustomMethod `
+                        -LogFolder         $VerifyLogFolder `
+                        -AppNameHint       $AppNameHint
+                    $UResult2.Source = "UserEntered"
+                    $script:UninstallAttempts.Add($UResult2)
+
+                    if ($UResult2.Success) {
+                        Write-Host "  [PASS]  App removed successfully." -ForegroundColor Green
+                        $script:UninstallVerified = $true
+                        # Update fallback with the working command
+                        if ($CustomMethod -eq "MSI") {
+                            $Pkg.UninstallMethod     = "MSI"
+                            $Pkg.FallbackProductCode = ([regex]::Match($CustomUCmd, '\{[0-9A-Fa-f\-]{36}\}')).Value
+                        } else {
+                            $Pkg.UninstallMethod = "EXE"
+                            if ($CustomUCmd -match '^"([^"]+)"(.*)$') {
+                                $Pkg.FallbackExePath = $Matches[1]; $Pkg.FallbackExeArgs = $Matches[2].Trim()
+                            } else {
+                                $Parts = $CustomUCmd -split ' ',2
+                                $Pkg.FallbackExePath = $Parts[0]; $Pkg.FallbackExeArgs = if ($Parts.Count -gt 1) { $Parts[1] } else { "" }
+                            }
+                        }
+                        $Pkg.UninstallCommand = $CustomUCmd
+                        Write-Host "  Uninstall fallback updated with working command." -ForegroundColor Green
+                        break UninstallLoop
+                    } else {
+                        Write-Host "  [FAIL]  Still not removed." -ForegroundColor Red
+                        if (-not (Read-YN "  Try another command?")) {
+                            $AttemptSummary = Format-AttemptLog -Attempts $script:UninstallAttempts
+                            Add-EscalationFlag "Uninstall verification FAILED after $($script:UninstallAttempts.Count) attempt(s).`r`n`r`n  Attempts:`r`n$AttemptSummary"
+                            Write-Host "  All attempts logged to Escalation-Notes.txt." -ForegroundColor Yellow
+                            break UninstallLoop
+                        }
+                    }
+                }
+            }
+
+        } else {
+            Write-Host "  Skipping uninstall verification." -ForegroundColor DarkGray
+            Add-EscalationFlag "Uninstall command was NOT verified by a live test on this machine. Validate on a test device before broad deployment."
+        }
+    } else {
+        Write-Host ""
+        Write-Host "  App is not installed on this machine -- uninstall cannot be tested now." -ForegroundColor DarkGray
+        Write-Host "  Make sure to test uninstall on a test device before deploying broadly." -ForegroundColor DarkGray
+        Add-EscalationFlag "Uninstall was NOT tested because '$AppName' is not installed on the packaging machine. Test on a real device before broad deployment."
+    }
+
 
 
     #######################################################################################
@@ -1192,7 +1685,7 @@ Function Main {
     # Escalation Notes
     if ($script:EscalationFlags.Count -gt 0) {
         Write-Host "  Writing Escalation-Notes.txt..." -ForegroundColor DarkGray
-        $EscNotes = Build-EscalationNotes -Pkg $Pkg -Flags $script:EscalationFlags
+        $EscNotes = Build-EscalationNotes -Pkg $Pkg -Flags $script:EscalationFlags -InstallAttempts $script:InstallAttempts -UninstallAttempts $script:UninstallAttempts
         $EscNotes | Out-File -FilePath (Join-Path $PackageFolder "Escalation-Notes.txt") -Encoding UTF8 -Force
     }
 
@@ -1252,7 +1745,7 @@ Function Main {
     $Summary | Out-File -FilePath (Join-Path $PackageFolder "Package-Summary.txt") -Encoding UTF8 -Force
 
     if ($script:EscalationFlags.Count -gt 0) {
-        $EscNotes = Build-EscalationNotes -Pkg $Pkg -Flags $script:EscalationFlags
+        $EscNotes = Build-EscalationNotes -Pkg $Pkg -Flags $script:EscalationFlags -InstallAttempts $script:InstallAttempts -UninstallAttempts $script:UninstallAttempts
         $EscNotes | Out-File -FilePath (Join-Path $PackageFolder "Escalation-Notes.txt") -Encoding UTF8 -Force
     }
 
