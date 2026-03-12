@@ -1,174 +1,236 @@
 ###########################################################################################
-# Uninstall-[APPNAME].ps1
-# Version 1.0
+# Uninstall-Interactive.ps1
+# Version 2.0
 #
-# ---------------------------------------------------------------
-# FILL IN: Replace [APPNAME] in the filename and throughout
-#          this script with your application name.
-#          Example: Uninstall-7Zip.ps1
-# ---------------------------------------------------------------
-#
-# Wrapper script for silent uninstallation of [APPLICATION FULL NAME]
+# Interactive wrapper for silent uninstallation of any Win32 app
 # Designed for Intune Win32 deployment
 #
-# Log output: C:\ProgramData\Microsoft\IntuneManagementExtension\Logs\[APPNAME]\
-#             [APPNAME]_LogFile_Uninstaller_YYYY-MM-DD_HHMMSS.log
+# HOW TO USE:
+#   Run the script and follow the prompts. No manual config needed.
+#   The script will:
+#     1. Ask you what app to search for
+#     2. Scan the registry and find all matching installs
+#     3. Show you what it found and confirm before doing anything
+#     4. Perform the uninstall silently with full logging
+#     5. Clean up leftovers and verify removal
 #
-# HOW TO TEST LOCALLY BEFORE PACKAGING:
-#   Option A - Dot source (from the folder containing the script):
-#        cd "C:\Path\To\PackageFolder"
-#        . .\Uninstall-[APPNAME].ps1
+# HOW TO TEST LOCALLY:
+#   powershell.exe -ExecutionPolicy Bypass -File ".\Uninstall-Interactive.ps1"
 #
-#   Option B - Direct file execution:
-#        powershell.exe -ExecutionPolicy Bypass -File ".\Uninstall-[APPNAME].ps1"
+# Log output:
+#   C:\ProgramData\Microsoft\IntuneManagementExtension\Logs\[AppName]\
 #
-#   Then review the log at:
-#        C:\ProgramData\Microsoft\IntuneManagementExtension\Logs\[APPNAME]\
-#
-# Last Updated: [DATE]
+# Last Updated: 2026-03-12
 ###########################################################################################
 
 [CmdletBinding()]
-Param()
-
-###########################################################################################
-# CONFIGURATION BLOCK
-# Fill in all values in this block before using this script.
-###########################################################################################
-
-# ---------------------------------------------------------------
-# APPLICATION DETAILS
-# ---------------------------------------------------------------
-
-# The display name shown in logs
-# Example: "7-Zip 24.08"
-$AppName = "[APPLICATION DISPLAY NAME]"
-
-# ---------------------------------------------------------------
-# PRODUCT CODE / UNINSTALL METHOD
-# How to uninstall depends on the installer type used.
-#
-# OPTION A - MSI Product Code (most common):
-#   Find it after install by running:
-#     Get-ChildItem "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall" |
-#         Get-ItemProperty |
-#         Where-Object { $_.DisplayName -like "*YourApp*" } |
-#         Select-Object DisplayName, PSChildName
-#   PSChildName will be the GUID.
-#   Example: "{12345678-1234-1234-1234-123456789ABC}"
-#
-# OPTION B - EXE uninstaller (some apps ship their own uninstall.exe):
-#   Find the UninstallString from the same registry query above.
-#   Example: "C:\Program Files\YourApp\uninstall.exe"
-#
-# OPTION C - Silent flags only (no product code needed):
-#   Some EXE installers support silent uninstall via flags.
-#   Example: "C:\Program Files\YourApp\setup.exe" /uninstall /silent
-# ---------------------------------------------------------------
-
-# Set the uninstall method: "MSI", "EXE"
-$UninstallMethod = "MSI"
-
-# For MSI uninstall - the product GUID
-# Example: "{12345678-1234-1234-1234-123456789ABC}"
-$ProductCode = "[PRODUCT GUID]"
-
-# For EXE uninstall - full path to uninstaller and its silent arguments
-# Example path: "C:\Program Files\YourApp\uninstall.exe"
-# Example args: "/S" or "/silent /norestart"
-$UninstallerPath = "[FULL PATH TO UNINSTALLER EXE]"
-$UninstallArguments = "[SILENT UNINSTALL ARGUMENTS]"
-
-# ---------------------------------------------------------------
-# REGISTRY DETECTION PATH
-# Same as in the install script - used to confirm removal worked.
-# Example: "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{GUID}"
-# ---------------------------------------------------------------
-$RegistryDetectionPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\[PRODUCT GUID OR NAME]"
-
-# ---------------------------------------------------------------
-# LEFTOVER CLEANUP
-# Paths to remove after uninstall if the installer leaves them behind.
-# Add as many as needed. Leave the arrays empty if nothing to clean up.
-#
-# Folder examples:
-#   "C:\Program Files\YourApp"
-#   "C:\ProgramData\YourApp"
-#
-# Registry key examples:
-#   "HKLM:\SOFTWARE\YourCompany\YourApp"
-#   "HKCU:\SOFTWARE\YourApp"
-# ---------------------------------------------------------------
-$LeftoverFolders  = @(
-    # "C:\Program Files\[APPNAME]"       # Uncomment and fill in as needed
-    # "C:\ProgramData\[APPNAME]"
+Param(
+    # Optional: pass app search term as a parameter to skip the first prompt
+    # Example: .\Uninstall-Interactive.ps1 -AppSearch "7-Zip"
+    [string]$AppSearch = ""
 )
 
-$LeftoverRegKeys  = @(
-    # "HKLM:\SOFTWARE\[VENDOR]\[APPNAME]"   # Uncomment and fill in as needed
-)
+###########################################################################################
+# HELPER FUNCTIONS
+###########################################################################################
 
-# ---------------------------------------------------------------
-# LOG FOLDER NAME
-# Should match what you used in the install script.
-# Example: "7Zip"
-# ---------------------------------------------------------------
-$LogFolderName = "[APPNAME]"
+Function Write-Banner {
+    param([string]$Text)
+    $Width = 82
+    $Line  = "#" * $Width
+    $Pad   = [math]::Floor(($Width - $Text.Length - 2) / 2)
+    $Inner = "#" + (" " * $Pad) + $Text + (" " * ($Width - $Pad - $Text.Length - 2)) + "#"
+    Write-Host ""
+    Write-Host $Line            -ForegroundColor Cyan
+    Write-Host $Inner           -ForegroundColor Cyan
+    Write-Host $Line            -ForegroundColor Cyan
+    Write-Host ""
+}
+
+Function Write-Section {
+    param([string]$Title, [switch]$NoLog)
+    $Divider = "-" * 80
+    Write-Host ""
+    Write-Host $Divider -ForegroundColor Cyan
+    Write-Host "  $Title" -ForegroundColor Cyan
+    Write-Host $Divider -ForegroundColor Cyan
+    if (-not $NoLog -and $script:LogFile) {
+        Add-Content -Path $script:LogFile -Value "" -ErrorAction SilentlyContinue
+        Add-Content -Path $script:LogFile -Value $Divider -ErrorAction SilentlyContinue
+        Add-Content -Path $script:LogFile -Value "  $Title" -ErrorAction SilentlyContinue
+        Add-Content -Path $script:LogFile -Value $Divider -ErrorAction SilentlyContinue
+    }
+}
+
+Function Write-Log {
+    param(
+        [string]$Message,
+        [string]$Level = 'INFO'
+    )
+    $PaddedLevel = $Level.PadRight(5)
+    $Entry = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')  [$PaddedLevel]  $Message"
+    if ($script:LogFile) {
+        Add-Content -Path $script:LogFile -Value $Entry -ErrorAction SilentlyContinue
+    }
+    switch ($Level) {
+        'ERROR' { Write-Host $Entry -ForegroundColor Red }
+        'WARN'  { Write-Host $Entry -ForegroundColor Yellow }
+        'OK'    { Write-Host $Entry -ForegroundColor Green }
+        'PROMPT'{ Write-Host $Entry -ForegroundColor Magenta }
+        default { Write-Host $Entry -ForegroundColor White }
+    }
+}
 
 ###########################################################################################
-# END OF CONFIGURATION BLOCK - No edits needed below this line for standard packages
+# REGISTRY DISCOVERY
+# Searches all standard uninstall registry hives for matching apps
+###########################################################################################
+
+Function Get-InstalledApps {
+    param([string]$SearchTerm)
+
+    $RegistryPaths = @(
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
+        "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
+    )
+
+    $Results = @()
+
+    foreach ($Path in $RegistryPaths) {
+        if (-not (Test-Path $Path)) { continue }
+
+        Get-ChildItem $Path -ErrorAction SilentlyContinue | ForEach-Object {
+            $Props = Get-ItemProperty $_.PsPath -ErrorAction SilentlyContinue
+
+            # Skip system components and updates - they clutter results
+            if ($Props.SystemComponent -eq 1)    { return }
+            if ($Props.DisplayName -match "^KB\d") { return }
+            if ([string]::IsNullOrWhiteSpace($Props.DisplayName)) { return }
+
+            if ($Props.DisplayName -like "*$SearchTerm*") {
+                $Results += [PSCustomObject]@{
+                    DisplayName      = $Props.DisplayName
+                    DisplayVersion   = $Props.DisplayVersion
+                    Publisher        = $Props.Publisher
+                    InstallDate      = $Props.InstallDate
+                    InstallLocation  = $Props.InstallLocation
+                    # The registry key name itself is the GUID (or product code) for MSI apps
+                    PSChildName      = $_.PSChildName
+                    RegistryPath     = $_.PsPath
+                    # Raw uninstall string - tells us if MSI or EXE
+                    UninstallString  = $Props.UninstallString
+                    QuietUninstall   = $Props.QuietUninstallString
+                    Hive             = $Path
+                }
+            }
+        }
+    }
+
+    return $Results
+}
+
+###########################################################################################
+# UNINSTALL METHOD DETECTION
+# Inspects what was found and recommends the best uninstall approach
+###########################################################################################
+
+Function Resolve-UninstallMethod {
+    param([PSCustomObject]$App)
+
+    $Method = [PSCustomObject]@{
+        Type             = ""
+        ProductCode      = ""
+        ExePath          = ""
+        ExeArgs          = ""
+        DisplayMethod    = ""
+        RegistryPath     = $App.RegistryPath
+        Confidence       = "High"
+        Notes            = ""
+    }
+
+    # GUID pattern - a proper GUID key name means this is an MSI product
+    if ($App.PSChildName -match '^\{[0-9A-Fa-f\-]{36}\}$') {
+        $Method.Type          = "MSI"
+        $Method.ProductCode   = $App.PSChildName
+        $Method.DisplayMethod = "MSI  |  msiexec /x $($App.PSChildName) /quiet /norestart"
+        return $Method
+    }
+
+    # QuietUninstallString is the gold standard - app explicitly provides a silent CLI
+    if (-not [string]::IsNullOrWhiteSpace($App.QuietUninstall)) {
+        $Parsed = Split-CommandLine $App.QuietUninstall
+        $Method.Type          = "EXE"
+        $Method.ExePath       = $Parsed.Executable
+        $Method.ExeArgs       = $Parsed.Arguments
+        $Method.DisplayMethod = "EXE  |  $($App.QuietUninstall)"
+        $Method.Notes         = "Using QuietUninstallString from registry"
+        return $Method
+    }
+
+    # UninstallString - check if it's an MSI command disguised as a string
+    if (-not [string]::IsNullOrWhiteSpace($App.UninstallString)) {
+        if ($App.UninstallString -match 'msiexec' -and $App.UninstallString -match '\{[0-9A-Fa-f\-]{36}\}') {
+            $GuidMatch = [regex]::Match($App.UninstallString, '\{[0-9A-Fa-f\-]{36}\}')
+            $Method.Type          = "MSI"
+            $Method.ProductCode   = $GuidMatch.Value
+            $Method.DisplayMethod = "MSI  |  msiexec /x $($GuidMatch.Value) /quiet /norestart"
+            $Method.Notes         = "GUID extracted from UninstallString"
+            return $Method
+        }
+
+        # Plain EXE uninstall string
+        $Parsed = Split-CommandLine $App.UninstallString
+        $Method.Type          = "EXE"
+        $Method.ExePath       = $Parsed.Executable
+        # Try common silent flags - these are the most universal
+        $Method.ExeArgs       = "/S /SILENT /quiet"
+        $Method.DisplayMethod = "EXE  |  $($Parsed.Executable)  $($Method.ExeArgs)"
+        $Method.Confidence    = "Medium"
+        $Method.Notes         = "Silent flags guessed - review before deploying"
+        return $Method
+    }
+
+    # Nothing found - fall back to manual
+    $Method.Type          = "UNKNOWN"
+    $Method.Confidence    = "Low"
+    $Method.DisplayMethod = "Could not determine uninstall method automatically"
+    $Method.Notes         = "Check UninstallString in registry manually"
+    return $Method
+}
+
+# Splits a command string into executable + arguments, handling quoted paths
+Function Split-CommandLine {
+    param([string]$CommandLine)
+
+    $CommandLine = $CommandLine.Trim()
+
+    if ($CommandLine -match '^"([^"]+)"(.*)$') {
+        return [PSCustomObject]@{
+            Executable = $Matches[1].Trim()
+            Arguments  = $Matches[2].Trim()
+        }
+    }
+    elseif ($CommandLine -match '^(\S+)(.*)$') {
+        return [PSCustomObject]@{
+            Executable = $Matches[1].Trim()
+            Arguments  = $Matches[2].Trim()
+        }
+    }
+
+    return [PSCustomObject]@{ Executable = $CommandLine; Arguments = "" }
+}
+
+###########################################################################################
+# MAIN
 ###########################################################################################
 
 Function Main {
 
     $STARTTIME = Get-Date
+    $script:LogFile = $null  # Will be set after user picks an app
 
-    #######################################################################################
-    # Logging Setup
-    #######################################################################################
-
-    $LogFolder = "C:\ProgramData\Microsoft\IntuneManagementExtension\Logs\$LogFolderName"
-    if (-not (Test-Path $LogFolder)) {
-        New-Item -Path $LogFolder -ItemType Directory -Force | Out-Null
-    }
-
-    $Timestamp = Get-Date -Format "yyyy-MM-dd_HHmmss"
-    $LogFile   = "$LogFolder\$($LogFolderName)_LogFile_Uninstaller_$Timestamp.log"
-
-    Function Write-Log {
-        param(
-            [string]$Message,
-            [string]$Level = 'INFO'
-        )
-        $PaddedLevel = $Level.PadRight(5)
-        $Entry = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')  [$PaddedLevel]  $Message"
-        Add-Content -Path $LogFile -Value $Entry -ErrorAction SilentlyContinue
-        switch ($Level) {
-            'ERROR' { Write-Host $Entry -ForegroundColor Red }
-            'WARN'  { Write-Host $Entry -ForegroundColor Yellow }
-            'OK'    { Write-Host $Entry -ForegroundColor Green }
-            default { Write-Host $Entry -ForegroundColor White }
-        }
-    }
-
-    Function Write-Section {
-        param([string]$Title)
-        $Divider = "-" * 80
-        Add-Content -Path $LogFile -Value "" -ErrorAction SilentlyContinue
-        Add-Content -Path $LogFile -Value $Divider -ErrorAction SilentlyContinue
-        Add-Content -Path $LogFile -Value "  $Title" -ErrorAction SilentlyContinue
-        Add-Content -Path $LogFile -Value $Divider -ErrorAction SilentlyContinue
-        Write-Host ""
-        Write-Host $Divider -ForegroundColor Cyan
-        Write-Host "  $Title" -ForegroundColor Cyan
-        Write-Host $Divider -ForegroundColor Cyan
-    }
-
-    Write-Section "$AppName -- UNINSTALLER LOG"
-    Write-Log "Log File   : $LogFile"
-    Write-Log "Start Time : $STARTTIME"
-    Write-Log "Computer   : $env:COMPUTERNAME"
-    Write-Log "User       : $env:USERNAME"
+    Write-Banner "INTUNE UNINSTALL SCRIPT  v2.0"
 
     #######################################################################################
     # Admin Check
@@ -176,115 +238,313 @@ Function Main {
 
     $IsAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
     if (-not $IsAdmin) {
-        Write-Log "Script must be run as Administrator. Exiting." "ERROR"
+        Write-Host "  [ERROR] This script must be run as Administrator." -ForegroundColor Red
+        Write-Host "  Right-click PowerShell and choose 'Run as Administrator'." -ForegroundColor Yellow
+        Write-Host ""
         exit 1
     }
-    Write-Log "Running as Administrator." "OK"
 
     #######################################################################################
-    # Step 1 -- Uninstall Application
+    # Step 1 -- Search for the Application
     #######################################################################################
 
-    Write-Section "STEP 1 -- UNINSTALL $($AppName.ToUpper())"
+    Write-Section "STEP 1 -- FIND APPLICATION" -NoLog
 
-    $AppKey = Get-ItemProperty $RegistryDetectionPath -ErrorAction SilentlyContinue
+    $SelectedApp    = $null
+    $UninstallInfo  = $null
 
-    if (-not $AppKey) {
-        Write-Log "$AppName does not appear to be installed. Skipping uninstall." "WARN"
+    do {
+        # Get search term - either from parameter or by prompting
+        if ([string]::IsNullOrWhiteSpace($AppSearch)) {
+            Write-Host "  Enter the application name (or partial name) to search for:" -ForegroundColor Cyan
+            Write-Host "  Example: '7-Zip'  or  'Adobe'  or  'Chrome'" -ForegroundColor DarkGray
+            Write-Host ""
+            $SearchTerm = Read-Host "  Search"
+        }
+        else {
+            $SearchTerm = $AppSearch
+            $AppSearch  = ""  # Clear so retry prompts the user
+            Write-Host "  Searching for: $SearchTerm" -ForegroundColor Cyan
+        }
+
+        if ([string]::IsNullOrWhiteSpace($SearchTerm)) {
+            Write-Host "  Search term cannot be empty. Try again." -ForegroundColor Yellow
+            continue
+        }
+
+        Write-Host ""
+        Write-Host "  Scanning registry..." -ForegroundColor DarkGray
+
+        $FoundApps = @(Get-InstalledApps -SearchTerm $SearchTerm)
+
+        if ($FoundApps.Count -eq 0) {
+            Write-Host ""
+            Write-Host "  [!] No applications found matching '$SearchTerm'." -ForegroundColor Yellow
+            Write-Host "      Try a shorter or different search term." -ForegroundColor DarkGray
+            Write-Host ""
+            $Retry = Read-Host "  Search again? (Y/N)"
+            if ($Retry -notmatch '^[Yy]') { exit 0 }
+            continue
+        }
+
+        ###################################################################################
+        # Display search results
+        ###################################################################################
+
+        Write-Host ""
+        Write-Host "  Found $($FoundApps.Count) match(es):" -ForegroundColor Green
+        Write-Host ""
+
+        $Index = 0
+        foreach ($App in $FoundApps) {
+            $Index++
+            $UM = Resolve-UninstallMethod -App $App
+
+            Write-Host "  [$Index]  $($App.DisplayName)" -ForegroundColor White
+            Write-Host "       Version    : $($App.DisplayVersion)" -ForegroundColor Gray
+            Write-Host "       Publisher  : $($App.Publisher)" -ForegroundColor Gray
+            Write-Host "       Method     : $($UM.DisplayMethod)" -ForegroundColor Gray
+
+            if ($UM.Notes) {
+                $ConfColor = switch ($UM.Confidence) {
+                    "High"   { "Green" }
+                    "Medium" { "Yellow" }
+                    "Low"    { "Red" }
+                }
+                Write-Host "       Note       : $($UM.Notes)" -ForegroundColor $ConfColor
+            }
+
+            Write-Host "       Registry   : $($App.RegistryPath)" -ForegroundColor DarkGray
+            Write-Host ""
+        }
+
+        ###################################################################################
+        # Let user pick
+        ###################################################################################
+
+        if ($FoundApps.Count -eq 1) {
+            Write-Host "  Only one match found. Select it? (Y) or search again (S) or exit (N)" -ForegroundColor Cyan
+            $Pick = Read-Host "  Choice"
+            if ($Pick -match '^[Yy]') {
+                $SelectedApp   = $FoundApps[0]
+                $UninstallInfo = Resolve-UninstallMethod -App $SelectedApp
+            }
+            elseif ($Pick -match '^[Ss]') { continue }
+            else { exit 0 }
+        }
+        else {
+            Write-Host "  Enter the number of the app to uninstall, or (S) to search again, or (N) to exit:" -ForegroundColor Cyan
+            $Pick = Read-Host "  Choice"
+
+            if ($Pick -match '^[Ss]') { continue }
+            if ($Pick -match '^[Nn]') { exit 0 }
+
+            $PickNum  = [int]$Pick
+            $AppCount = $FoundApps.Count
+            if ($PickNum -lt 1 -or $PickNum -gt $AppCount) {
+                Write-Host "  Invalid selection. Enter a number between 1 and $AppCount." -ForegroundColor Yellow
+                continue
+            }
+
+            $SelectedApp   = $FoundApps[$PickNum - 1]
+            $UninstallInfo = Resolve-UninstallMethod -App $SelectedApp
+        }
+
+    } while (-not $SelectedApp)
+
+    #######################################################################################
+    # Step 2 -- Confirm Before Proceeding
+    #######################################################################################
+
+    # Now that we know the app name, set up logging
+    $SafeName    = $SelectedApp.DisplayName -replace '[^A-Za-z0-9_\-]', '_'
+    $LogFolder   = "C:\ProgramData\Microsoft\IntuneManagementExtension\Logs\$SafeName"
+    $Timestamp   = Get-Date -Format "yyyy-MM-dd_HHmmss"
+    $script:LogFile = "$LogFolder\$($SafeName)_LogFile_Uninstaller_$Timestamp.log"
+
+    if (-not (Test-Path $LogFolder)) {
+        New-Item -Path $LogFolder -ItemType Directory -Force | Out-Null
     }
-    else {
-        Write-Log "Found: $($AppKey.DisplayName) $($AppKey.DisplayVersion)"
 
-        try {
-            if ($UninstallMethod -eq "MSI") {
-                # MSI uninstall using product code
-                $Args = "/x $ProductCode /quiet /norestart /l*v `"$LogFolder\$($LogFolderName)_LogFile_MSI_Uninstall_$Timestamp.log`""
-                Write-Log "Running MSI uninstall: msiexec.exe $Args"
-                $Proc = Start-Process "msiexec.exe" -ArgumentList $Args -Wait -PassThru -NoNewWindow
-            }
-            elseif ($UninstallMethod -eq "EXE") {
-                # EXE uninstall
-                Write-Log "Running EXE uninstall: $UninstallerPath $UninstallArguments"
-                $Proc = Start-Process $UninstallerPath -ArgumentList $UninstallArguments -Wait -PassThru -NoNewWindow
-            }
+    Write-Section "STEP 2 -- CONFIRM UNINSTALL"
+    Write-Log "Log File   : $script:LogFile"
+    Write-Log "Start Time : $STARTTIME"
+    Write-Log "Computer   : $env:COMPUTERNAME"
+    Write-Log "User       : $env:USERNAME"
 
-            Write-Log "Uninstall exit code: $($Proc.ExitCode)"
+    Write-Host ""
+    Write-Host "  Please review the uninstall plan before proceeding:" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "  Application  : $($SelectedApp.DisplayName)" -ForegroundColor White
+    Write-Host "  Version      : $($SelectedApp.DisplayVersion)" -ForegroundColor White
+    Write-Host "  Publisher    : $($SelectedApp.Publisher)" -ForegroundColor White
+    Write-Host "  Install Date : $($SelectedApp.InstallDate)" -ForegroundColor White
+    Write-Host "  Install Path : $($SelectedApp.InstallLocation)" -ForegroundColor White
+    Write-Host ""
+    Write-Host "  Uninstall Method:" -ForegroundColor Cyan
 
-            if ($Proc.ExitCode -eq 0 -or $Proc.ExitCode -eq 3010) {
-                Write-Log "$AppName uninstalled successfully." "OK"
-            }
-            else {
-                Write-Log "Uninstall returned unexpected exit code: $($Proc.ExitCode)" "ERROR"
-                exit $Proc.ExitCode
+    switch ($UninstallInfo.Type) {
+        "MSI" {
+            Write-Host "    Type         : MSI (Windows Installer)" -ForegroundColor White
+            Write-Host "    Product Code : $($UninstallInfo.ProductCode)" -ForegroundColor White
+            Write-Host "    Command      : msiexec.exe /x $($UninstallInfo.ProductCode) /quiet /norestart" -ForegroundColor White
+        }
+        "EXE" {
+            $ConfColor = if ($UninstallInfo.Confidence -eq "High") { "White" } else { "Yellow" }
+            Write-Host "    Type         : EXE Uninstaller" -ForegroundColor White
+            Write-Host "    Executable   : $($UninstallInfo.ExePath)" -ForegroundColor $ConfColor
+            Write-Host "    Arguments    : $($UninstallInfo.ExeArgs)" -ForegroundColor $ConfColor
+            if ($UninstallInfo.Confidence -ne "High") {
+                Write-Host ""
+                Write-Host "    [!] Confidence is $($UninstallInfo.Confidence) - silent flags were guessed." -ForegroundColor Yellow
+                Write-Host "        You may be prompted to edit the arguments." -ForegroundColor Yellow
             }
         }
-        catch {
-            Write-Log "Exception during uninstall: $($_.Exception.Message)" "ERROR"
-            exit 1
+        "UNKNOWN" {
+            Write-Host "    [!] Could not determine uninstall method automatically." -ForegroundColor Red
+            Write-Host "        Manual intervention will be required." -ForegroundColor Red
         }
     }
 
+    Write-Host ""
+
+    # For medium-confidence EXE, offer to edit the arguments
+    if ($UninstallInfo.Type -eq "EXE" -and $UninstallInfo.Confidence -ne "High") {
+        Write-Host "  The silent arguments '$($UninstallInfo.ExeArgs)' were guessed." -ForegroundColor Yellow
+        Write-Host "  Edit them now? (Y to edit, N to keep as-is):" -ForegroundColor Cyan
+        $EditArgs = Read-Host "  Choice"
+        if ($EditArgs -match '^[Yy]') {
+            Write-Host "  Current: $($UninstallInfo.ExeArgs)" -ForegroundColor Gray
+            $NewArgs = Read-Host "  New arguments"
+            if (-not [string]::IsNullOrWhiteSpace($NewArgs)) {
+                $UninstallInfo.ExeArgs = $NewArgs
+                Write-Host "  Arguments updated to: $NewArgs" -ForegroundColor Green
+            }
+        }
+        Write-Host ""
+    }
+
+    if ($UninstallInfo.Type -eq "UNKNOWN") {
+        Write-Log "Cannot determine uninstall method. Exiting." "ERROR"
+        exit 1
+    }
+
+    Write-Host "  Proceed with uninstall? (Y/N):" -ForegroundColor Cyan
+    $Confirm = Read-Host "  Choice"
+    if ($Confirm -notmatch '^[Yy]') {
+        Write-Host "  Uninstall cancelled by user." -ForegroundColor Yellow
+        exit 0
+    }
+
+    Write-Log "User confirmed uninstall of: $($SelectedApp.DisplayName) $($SelectedApp.DisplayVersion)"
+
     #######################################################################################
-    # Step 2 -- Leftover Cleanup
+    # Step 3 -- Execute Uninstall
     #######################################################################################
 
-    Write-Section "STEP 2 -- LEFTOVER CLEANUP"
+    Write-Section "STEP 3 -- EXECUTE UNINSTALL"
 
-    # Remove leftover folders
-    foreach ($Folder in $LeftoverFolders) {
-        if ($Folder -and (Test-Path $Folder)) {
-            Write-Log "Removing folder: $Folder"
+    try {
+        if ($UninstallInfo.Type -eq "MSI") {
+            $MsiLog  = "$LogFolder\$($SafeName)_MSI_Uninstall_$Timestamp.log"
+            $MsiArgs = "/x $($UninstallInfo.ProductCode) /quiet /norestart /l*v `"$MsiLog`""
+            Write-Log "Running: msiexec.exe $MsiArgs"
+            $Proc = Start-Process "msiexec.exe" -ArgumentList $MsiArgs -Wait -PassThru -NoNewWindow
+        }
+        elseif ($UninstallInfo.Type -eq "EXE") {
+            Write-Log "Running: $($UninstallInfo.ExePath)  $($UninstallInfo.ExeArgs)"
+            $Proc = Start-Process $UninstallInfo.ExePath -ArgumentList $UninstallInfo.ExeArgs -Wait -PassThru -NoNewWindow
+        }
+
+        Write-Log "Exit code: $($Proc.ExitCode)"
+
+        if ($Proc.ExitCode -eq 0) {
+            Write-Log "Uninstall completed successfully." "OK"
+        }
+        elseif ($Proc.ExitCode -eq 3010) {
+            Write-Log "Uninstall completed - reboot required." "WARN"
+        }
+        else {
+            Write-Log "Uninstall returned unexpected exit code: $($Proc.ExitCode)" "ERROR"
+            exit $Proc.ExitCode
+        }
+    }
+    catch {
+        Write-Log "Exception during uninstall: $($_.Exception.Message)" "ERROR"
+        exit 1
+    }
+
+    #######################################################################################
+    # Step 4 -- Optional Leftover Cleanup
+    #######################################################################################
+
+    Write-Section "STEP 4 -- LEFTOVER CLEANUP"
+
+    # Check install folder
+    if (-not [string]::IsNullOrWhiteSpace($SelectedApp.InstallLocation) -and (Test-Path $SelectedApp.InstallLocation)) {
+        Write-Host ""
+        Write-Host "  Install folder still exists: $($SelectedApp.InstallLocation)" -ForegroundColor Yellow
+        Write-Host "  Remove it? (Y/N):" -ForegroundColor Cyan
+        $RemoveFolder = Read-Host "  Choice"
+        if ($RemoveFolder -match '^[Yy]') {
             try {
-                Remove-Item $Folder -Recurse -Force -ErrorAction Stop
-                Write-Log "Folder removed." "OK"
+                Remove-Item $SelectedApp.InstallLocation -Recurse -Force -ErrorAction Stop
+                Write-Log "Removed install folder: $($SelectedApp.InstallLocation)" "OK"
             }
             catch {
                 Write-Log "Could not remove folder: $($_.Exception.Message)" "WARN"
             }
         }
     }
+    else {
+        Write-Log "No install folder to clean up (or already removed)." "OK"
+    }
 
-    # Remove leftover registry keys
-    foreach ($Key in $LeftoverRegKeys) {
-        if ($Key -and (Test-Path $Key)) {
-            Write-Log "Removing registry key: $Key"
+    # Ask about additional paths
+    Write-Host ""
+    Write-Host "  Do you want to remove any additional folders or registry keys? (Y/N):" -ForegroundColor Cyan
+    $Extra = Read-Host "  Choice"
+
+    while ($Extra -match '^[Yy]') {
+        Write-Host "  Enter a full path to remove (folder or registry key), or leave blank to stop:" -ForegroundColor Cyan
+        Write-Host "  Examples:  C:\ProgramData\MyApp   or   HKLM:\SOFTWARE\MyVendor\MyApp" -ForegroundColor DarkGray
+        $ExtraPath = Read-Host "  Path"
+
+        if ([string]::IsNullOrWhiteSpace($ExtraPath)) { break }
+
+        if (Test-Path $ExtraPath) {
             try {
-                Remove-Item $Key -Recurse -Force -ErrorAction Stop
-                Write-Log "Registry key removed." "OK"
+                Remove-Item $ExtraPath -Recurse -Force -ErrorAction Stop
+                Write-Log "Removed: $ExtraPath" "OK"
             }
             catch {
-                Write-Log "Could not remove registry key: $($_.Exception.Message)" "WARN"
+                Write-Log "Could not remove '$ExtraPath': $($_.Exception.Message)" "WARN"
             }
         }
+        else {
+            Write-Log "Path not found (may already be gone): $ExtraPath" "WARN"
+        }
+
+        Write-Host "  Remove another path? (Y/N):" -ForegroundColor Cyan
+        $Extra = Read-Host "  Choice"
     }
 
-    # ---------------------------------------------------------------
-    # OPTIONAL: ADD APP-SPECIFIC CLEANUP HERE
-    # Examples:
-    #   Stop a service before removal:
-    #     Stop-Service -Name "YourService" -Force -ErrorAction SilentlyContinue
-    #
-    #   Remove a scheduled task:
-    #     Unregister-ScheduledTask -TaskName "YourTask" -Confirm:$false -ErrorAction SilentlyContinue
-    #
-    #   Remove a cached installer:
-    #     $Cache = "$env:LOCALAPPDATA\Downloaded Installations\{GUID}"
-    #     if (Test-Path $Cache) { Remove-Item $Cache -Recurse -Force }
-    # ---------------------------------------------------------------
-
     #######################################################################################
-    # Verification
+    # Step 5 -- Verification
     #######################################################################################
 
-    Write-Section "VERIFICATION"
+    Write-Section "STEP 5 -- VERIFICATION"
     Start-Sleep -Seconds 5
 
-    $Check = Get-ItemProperty $RegistryDetectionPath -ErrorAction SilentlyContinue
+    $CheckPath = $SelectedApp.RegistryPath
+    $Check     = Get-ItemProperty $CheckPath -ErrorAction SilentlyContinue
+
     if (-not $Check) {
-        Write-Log "$AppName registry entry removed." "OK"
+        Write-Log "Registry entry removed. Uninstall verified." "OK"
     }
     else {
-        Write-Log "$AppName registry entry still present. Manual cleanup may be needed." "WARN"
+        Write-Log "Registry entry still present at: $CheckPath" "WARN"
+        Write-Log "App may still be installed or may require a reboot to complete removal." "WARN"
     }
 
     #######################################################################################
@@ -294,13 +554,21 @@ Function Main {
     $Duration = (Get-Date) - $STARTTIME
 
     Write-Section "SUMMARY"
-    Write-Log "Product    : $AppName"
+    Write-Log "Product    : $($SelectedApp.DisplayName) $($SelectedApp.DisplayVersion)"
+    Write-Log "Method     : $($UninstallInfo.Type)"
     Write-Log "Result     : Uninstall complete (check WARN/ERROR lines above if any)"
     Write-Log "Duration   : $Duration"
-    Write-Log "Log saved  : $LogFile"
+    Write-Log "Log saved  : $script:LogFile"
+
+    Write-Host ""
+    Write-Host "  Done. Full log written to:" -ForegroundColor Green
+    Write-Host "  $script:LogFile" -ForegroundColor Cyan
+    Write-Host ""
 
     exit 0
 }
+
+###########################################################################################
 
 try {
     Main
