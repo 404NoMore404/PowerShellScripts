@@ -1,56 +1,51 @@
 # ==============================================================================
 # Watch-Install.ps1
-# Purpose  : Runs an installer and monitors everything it does in real time.
-#            Useful for manually observing installs before packaging for Intune.
-#            Run this on a clean test machine or snapshot VM before packaging.
+# Purpose  : Interactive installer monitor. Pops a file picker, runs the
+#            installer, then prints a full report of every registry key and
+#            file the installer touched — no flags required.
 #
-# TIP      : The DisplayName and DisplayVersion values printed in the registry
-#            diff output are the exact values written by the installer. Copy the
-#            DisplayName and wrap it in wildcards (e.g. "*7-Zip*") to use as
-#            $DisplayNameFilter in Detect-APPNAME.ps1 and as $DetectionNameFilter
-#            in Invoke-IntuneInstall.ps1. This is the recommended way to populate
-#            both detection scripts without guessing.
+# Usage    : Right-click → "Run with PowerShell"  (self-elevates automatically)
+#            OR: .\Watch-Install.ps1
 #
-# Usage    : .\Watch-Install.ps1 -InstallerPath ".\setup.exe" -Arguments "/VERYSILENT" -WatchRegistry -WatchFiles
 # Author   : [CHANGE ME] - Your Name / Team Name
-# Version  : 1.2
+# Version  : 1.3
 # Changelog:
+#   1.3 - Full interactive mode. Removed mandatory params and CLI switches.
+#         Script now self-elevates, opens a WinForms file picker, prompts for
+#         optional silent arguments, then always captures registry and file
+#         changes. Post-install report printed to console with full detail:
+#         all new registry keys/values and all new/modified files by path.
 #   1.2 - Fixed ArgumentList validation error when no arguments are supplied.
 #         Start-Process rejects an empty string for -ArgumentList; both the
 #         primary and fallback launch paths now only include ArgumentList when
-#         the caller actually provided a value. Resolves crash with stub
-#         installers (e.g. ChromeSetup.exe) that also reject stream redirection.
+#         the caller actually provided a value.
 #   1.1 - Initial tracked release.
 # ==============================================================================
 
-param(
-    [Parameter(Mandatory)]
-    [string]$InstallerPath,
+# ==============================================================================
+# REGION: SELF-ELEVATION
+# ==============================================================================
+if (-not ([Security.Principal.WindowsPrincipal]
+          [Security.Principal.WindowsIdentity]::GetCurrent()
+         ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
 
-    # [CHANGE ME] - Set default Arguments to your most common silent switch if
-    #               you want a default fallback. Leave empty to force you to
-    #               always supply args explicitly (safer for testing).
-    [string]$Arguments = '',
-
-    # Log destination — must stay in IME logs path for Intune diagnostic collection.
-    # [CHANGE ME] - The prefix "PKG_" groups your logs together. Change to match
-    #               whatever prefix you set in the other scripts.
-    [string]$LogPath = "C:\ProgramData\Microsoft\IntuneManagementExtension\Logs\PKG_WatchInstall_$(Get-Date -Format 'yyyyMMdd_HHmmss').log",
-
-    # Switch flags — pass -WatchRegistry and/or -WatchFiles to enable snapshots.
-    [switch]$WatchRegistry,
-    [switch]$WatchFiles
-)
+    Write-Host "`n  Not running as Administrator — relaunching elevated...`n" -ForegroundColor Yellow
+    Start-Process powershell.exe `
+        -ArgumentList "-ExecutionPolicy Bypass -File `"$PSCommandPath`"" `
+        -Verb RunAs
+    exit
+}
 
 # ==============================================================================
 # REGION: LOGGING
 # ==============================================================================
-New-Item -ItemType Directory -Path (Split-Path $LogPath) -Force | Out-Null
+$script:LogPath = "C:\ProgramData\Microsoft\IntuneManagementExtension\Logs\PKG_WatchInstall_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+New-Item -ItemType Directory -Path (Split-Path $script:LogPath) -Force | Out-Null
 
 function Write-Log {
     param([string]$Message, [string]$Level = 'INFO')
     $entry = "[$(Get-Date -Format 'HH:mm:ss')] [$Level] $Message"
-    Add-Content -Path $LogPath -Value $entry -ErrorAction SilentlyContinue
+    Add-Content -Path $script:LogPath -Value $entry -ErrorAction SilentlyContinue
     switch ($Level) {
         'ERROR'   { Write-Host $entry -ForegroundColor Red }
         'WARN'    { Write-Host $entry -ForegroundColor Yellow }
@@ -60,89 +55,173 @@ function Write-Log {
 }
 
 # ==============================================================================
+# REGION: BANNER
+# ==============================================================================
+function Show-Banner {
+    Clear-Host
+    Write-Host ""
+    Write-Host "  ╔══════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
+    Write-Host "  ║           WATCH-INSTALL  v1.3  — Intune Packager         ║" -ForegroundColor Cyan
+    Write-Host "  ║    Monitors registry + filesystem changes during install  ║" -ForegroundColor Cyan
+    Write-Host "  ╚══════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
+    Write-Host ""
+}
+
+# ==============================================================================
+# REGION: FILE PICKER
+# ==============================================================================
+function Select-InstallerFile {
+    Add-Type -AssemblyName System.Windows.Forms | Out-Null
+
+    $dialog                  = New-Object System.Windows.Forms.OpenFileDialog
+    $dialog.Title            = "Select Installer File"
+    $dialog.Filter           = "Installers (*.exe;*.msi;*.msix;*.appx)|*.exe;*.msi;*.msix;*.appx|All Files (*.*)|*.*"
+    $dialog.InitialDirectory = "$env:USERPROFILE\Downloads"
+    $dialog.Multiselect      = $false
+
+    # Dummy owner form forces dialog to appear on top of the terminal
+    $owner        = New-Object System.Windows.Forms.Form
+    $owner.TopMost = $true
+
+    $result = $dialog.ShowDialog($owner)
+    $owner.Dispose()
+
+    if ($result -ne [System.Windows.Forms.DialogResult]::OK) {
+        Write-Host "`n  No file selected. Exiting.`n" -ForegroundColor Yellow
+        exit 0
+    }
+    return $dialog.FileName
+}
+
+# ==============================================================================
 # REGION: SNAPSHOT HELPERS
 # ------------------------------------------------------------------------------
-# These functions take a before/after snapshot of registry uninstall keys and
-# top-level program directories so you can see exactly what changed.
+# Registry snapshot  — captures every key under the standard uninstall hives.
+# Filesystem snapshot — captures top-level entries in watched install roots.
+#   After install:
+#     • Brand-new top-level dirs  → recursed fully for every file inside them.
+#     • Existing dirs with a newer LastWriteTime → scanned for files written
+#       after $StartTime (catches patches, config drops, etc.).
 #
-# The DisplayName and DisplayVersion values logged in the registry diff are
-# exactly what the installer registered. Use them directly:
-#   - Detect-APPNAME.ps1      : set $DisplayNameFilter = "*<DisplayName>*"
-#   - Invoke-IntuneInstall.ps1: set $DetectionNameFilter = "*<DisplayName>*"
-#
-# [CHANGE ME] - $registryKeys contains the standard uninstall hives. If your
-#               environment uses additional registry locations for app tracking
-#               or a custom software inventory key, add those paths here.
+# [CHANGE ME] - Add org-specific registry hives or install directories below.
 # ==============================================================================
 function Get-RegistrySnapshot {
-    $registryKeys = @(
+    $hives = @(
         'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
         'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall',
         'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall'
-        # [CHANGE ME] - Add any additional registry hives relevant to your environment here.
-        # Example: 'HKLM:\SOFTWARE\YourOrg\InstalledApps'
+        # [CHANGE ME] - Example: 'HKLM:\SOFTWARE\YourOrg\InstalledApps'
     )
-    $snapshot = @{}
-    foreach ($key in $registryKeys) {
-        Get-ChildItem $key -ErrorAction SilentlyContinue | ForEach-Object {
-            $snapshot[$_.PSPath] = $_
+    $snap = @{}
+    foreach ($hive in $hives) {
+        Get-ChildItem $hive -ErrorAction SilentlyContinue | ForEach-Object {
+            $snap[$_.PSPath] = $_
         }
     }
-    return $snapshot
+    return $snap
 }
 
-function Get-ProgramFilesSnapshot {
-    # [CHANGE ME] - $watchPaths contains the directories monitored for new folders
-    #               dropped by the installer. Add any additional paths your org
-    #               uses for software installs (e.g. a custom D:\Apps directory).
+function Get-FilesystemSnapshot {
     $watchPaths = @(
         $env:ProgramFiles,
         ${env:ProgramFiles(x86)},
         $env:LocalAppData,
-        $env:AppData
+        $env:AppData,
+        'C:\ProgramData'
         # [CHANGE ME] - Example: 'D:\Applications'
     )
-    $snapshot = @{}
-    foreach ($path in $watchPaths) {
-        if (Test-Path $path) {
-            Get-ChildItem $path -Directory -ErrorAction SilentlyContinue | ForEach-Object {
-                $snapshot[$_.FullName] = $_.LastWriteTime
-            }
+    $snap = @{}
+    foreach ($root in $watchPaths) {
+        if (-not (Test-Path $root)) { continue }
+        Get-ChildItem $root -ErrorAction SilentlyContinue | ForEach-Object {
+            $snap[$_.FullName] = $_.LastWriteTime
         }
     }
-    return $snapshot
+    return $snap
+}
+
+# ==============================================================================
+# REGION: REPORT HELPERS
+# ==============================================================================
+function Write-ReportHeader {
+    param([string]$Title)
+    $line = '─' * 62
+    Write-Host ""
+    Write-Host "  ┌$line┐" -ForegroundColor Cyan
+    Write-Host ("  │  {0,-60}│" -f $Title) -ForegroundColor Cyan
+    Write-Host "  └$line┘" -ForegroundColor Cyan
+}
+
+function Write-ReportSection {
+    param([string]$Label)
+    Write-Host ""
+    Write-Host "  ── $Label " -ForegroundColor DarkCyan -NoNewline
+    Write-Host ('─' * ([Math]::Max(2, 58 - $Label.Length))) -ForegroundColor DarkGray
+}
+
+function Write-ReportItem {
+    param([string]$Icon, [string]$Text, [ConsoleColor]$Color = 'White')
+    Write-Host "    $Icon  $Text" -ForegroundColor $Color
+}
+
+function Write-ReportSubItem {
+    param([string]$Text, [ConsoleColor]$Color = 'Gray')
+    Write-Host "         $Text" -ForegroundColor $Color
 }
 
 # ==============================================================================
 # REGION: MAIN EXECUTION
 # ==============================================================================
-Write-Log "===== WATCH-INSTALL STARTED ====="
+Show-Banner
+
+# ── Step 1: Pick installer ────────────────────────────────────────────────────
+Write-Host "  STEP 1 — Select your installer file" -ForegroundColor White
+Write-Host "  A file picker window is opening..." -ForegroundColor DarkGray
+Write-Host ""
+$InstallerPath = Select-InstallerFile
+$InstallerName = Split-Path $InstallerPath -Leaf
+$ext           = [System.IO.Path]::GetExtension($InstallerPath).ToLower()
+
+Write-Host "  OK  Selected: $InstallerName" -ForegroundColor Green
+Write-Host ""
+
+# ── Step 2: Optional silent arguments ────────────────────────────────────────
+Write-Host "  STEP 2 — Silent install arguments (optional)" -ForegroundColor White
+Write-Host "  Common examples:  /VERYSILENT   /S   /quiet   /QN" -ForegroundColor DarkGray
+Write-Host "  Press Enter to skip (installer GUI will appear)" -ForegroundColor DarkGray
+Write-Host ""
+Write-Host "  Arguments > " -ForegroundColor White -NoNewline
+$Arguments = (Read-Host).Trim()
+Write-Host ""
+
+# ── Step 3: Confirm ───────────────────────────────────────────────────────────
+Write-Host "  ┌──────────────────────────────────────────────────────────┐" -ForegroundColor DarkCyan
+Write-Host "  │  READY TO INSTALL                                         │" -ForegroundColor DarkCyan
+Write-Host "  │                                                            │" -ForegroundColor DarkCyan
+Write-Host ("  │  File      : {0,-47}│" -f ($InstallerName -replace '(.{44}).+','$1...')) -ForegroundColor White
+Write-Host ("  │  Arguments : {0,-47}│" -f $(if ($Arguments) { $Arguments } else { '(none — GUI mode)' })) -ForegroundColor White
+Write-Host "  │  Watching  : Registry + Filesystem (always on)            │" -ForegroundColor White
+Write-Host "  └──────────────────────────────────────────────────────────┘" -ForegroundColor DarkCyan
+Write-Host ""
+Write-Host "  Press Enter to start  |  Ctrl+C to cancel" -ForegroundColor DarkGray
+Read-Host | Out-Null
+
+# ── Step 4: Init log ─────────────────────────────────────────────────────────
+Write-Log "===== WATCH-INSTALL v1.3 STARTED ====="
 Write-Log "Installer : $InstallerPath"
-Write-Log "Arguments : $(if($Arguments){'(' + $Arguments + ')'}else{'(none supplied — installer may launch GUI)'} )"
-Write-Log "Log File  : $LogPath"
-Write-Log "WatchReg  : $WatchRegistry  |  WatchFiles: $WatchFiles"
+Write-Log "Arguments : $(if ($Arguments) { $Arguments } else { '(none)' })"
+Write-Log "Log File  : $script:LogPath"
 
-if (-not (Test-Path $InstallerPath)) {
-    Write-Log "Installer not found: $InstallerPath" 'ERROR'
-    exit 1
-}
+# ── Step 5: Pre-install snapshots ────────────────────────────────────────────
+Write-Host ""
+Write-Host "  Taking pre-install snapshots..." -ForegroundColor DarkGray
+$regBefore = Get-RegistrySnapshot
+$fsBefore  = Get-FilesystemSnapshot
+Write-Log "Pre-snapshot: $($regBefore.Count) registry keys, $($fsBefore.Count) filesystem entries."
 
-# --- Pre-install snapshots ---
-if ($WatchRegistry) {
-    Write-Log "Taking registry snapshot (before)..."
-    $regBefore = Get-RegistrySnapshot
-    Write-Log "Registry snapshot captured — $($regBefore.Count) existing uninstall keys."
-}
+$StartTime = Get-Date
 
-if ($WatchFiles) {
-    Write-Log "Taking filesystem snapshot (before)..."
-    $fsBefore = Get-ProgramFilesSnapshot
-    Write-Log "Filesystem snapshot captured — $($fsBefore.Count) existing top-level directories."
-}
-
-# --- Build launch parameters ---
-$ext = [System.IO.Path]::GetExtension($InstallerPath).ToLower()
-
+# ── Step 6: Build launch params ──────────────────────────────────────────────
 $procParams = @{
     Wait                   = $true
     PassThru               = $true
@@ -152,131 +231,181 @@ $procParams = @{
 }
 
 if ($ext -eq '.msi') {
-    # MSI must be launched via msiexec, not directly.
-    # /i "<path>" is always required; append caller-supplied args if provided.
     $procParams.FilePath = 'msiexec.exe'
     $msiArgs = "/i `"$InstallerPath`""
     if ($Arguments) { $msiArgs += " $Arguments" }
     $procParams.ArgumentList = $msiArgs
 } else {
     $procParams.FilePath = $InstallerPath
-    # FIX (v1.2): Only add ArgumentList when the caller actually supplied
-    # something. Start-Process throws a validation error if ArgumentList is
-    # an empty string, which crashes stub installers that also reject stream
-    # redirection (e.g. ChromeSetup.exe), preventing the fallback from working.
-    if ($Arguments) {
-        $procParams.ArgumentList = $Arguments
-    }
+    if ($Arguments) { $procParams.ArgumentList = $Arguments }
 }
 
+# ── Step 7: Launch installer ─────────────────────────────────────────────────
+Write-Host "  Launching installer — waiting for it to finish..." -ForegroundColor Yellow
+Write-Host "  (Complete the installation, then return here for your report)" -ForegroundColor DarkGray
 Write-Log "Launching installer..."
 
-# --- Execute ---
 try {
     $proc = Start-Process @procParams -ErrorAction Stop
 }
 catch {
-    # Some installers reject stdout/stderr redirection (GUI-only or stub installers).
-    # Fall back to a plain launch and just capture the exit code.
-    Write-Log "Redirected stdout/stderr launch failed. Falling back to direct launch (no stream capture)." 'WARN'
+    Write-Log "Redirected launch failed, falling back to direct launch." 'WARN'
     Write-Log "Reason: $_" 'WARN'
-
-    # FIX (v1.2): Build fallback params independently and only include
-    # ArgumentList if it was actually set in $procParams — avoids the same
-    # empty-string validation error that triggered the fallback in the first place.
-    $fallbackParams = @{
-        FilePath = $procParams.FilePath
-        Wait     = $true
-        PassThru = $true
-    }
+    $fallbackParams = @{ FilePath = $procParams.FilePath; Wait = $true; PassThru = $true }
     if ($procParams.ContainsKey('ArgumentList')) {
         $fallbackParams.ArgumentList = $procParams.ArgumentList
     }
-
     $proc = Start-Process @fallbackParams -ErrorAction Stop
 }
 
 $exitCode = $proc.ExitCode
-Write-Log "Installer process exited. Exit code: $exitCode" $(if ($exitCode -eq 0) { 'SUCCESS' } else { 'WARN' })
+Write-Log "Installer exited with code: $exitCode"
 
-# --- Capture stdout / stderr output if available ---
+# Capture stdout/stderr if present
 foreach ($stream in @('stdout', 'stderr')) {
-    $streamFile = "$env:TEMP\PKG_$stream.txt"
-    if (Test-Path $streamFile) {
-        $streamContent = Get-Content $streamFile -Raw -ErrorAction SilentlyContinue
-        if ($streamContent -and $streamContent.Trim()) {
-            Write-Log "[$stream output]:" 'INFO'
-            Write-Log $streamContent.Trim()
-        }
-        Remove-Item $streamFile -Force -ErrorAction SilentlyContinue
-    }
-}
-
-# --- Post-install registry diff ---
-if ($WatchRegistry) {
-    Write-Log "--- REGISTRY CHANGES (new uninstall keys added) ---" 'INFO'
-    $regAfter = Get-RegistrySnapshot
-    $newKeys  = $regAfter.Keys | Where-Object { -not $regBefore.ContainsKey($_) }
-
-    if ($newKeys) {
-        foreach ($key in $newKeys) {
-            $keyData = $regAfter[$key]
-            Write-Log "NEW KEY  : $key" 'SUCCESS'
-
-            # DisplayName and DisplayVersion are the values to use in your detection scripts.
-            # Copy DisplayName and wrap in wildcards for $DisplayNameFilter / $DetectionNameFilter.
-            $dispName = $keyData.GetValue('DisplayName')
-            $dispVer  = $keyData.GetValue('DisplayVersion')
-            if ($dispName) { Write-Log "  DisplayName    : $dispName  <-- use as: `"*$dispName*`"" 'SUCCESS' }
-            if ($dispVer)  { Write-Log "  DisplayVersion : $dispVer" 'SUCCESS' }
-        }
-    } else {
-        Write-Log "No new uninstall registry keys detected." 'WARN'
-        Write-Log "App may not write to standard uninstall hives. Consider File detection method instead." 'WARN'
-    }
-}
-
-# --- Post-install filesystem diff ---
-if ($WatchFiles) {
-    Write-Log "--- FILESYSTEM CHANGES (new top-level directories) ---" 'INFO'
-    $fsAfter = Get-ProgramFilesSnapshot
-    $newDirs  = $fsAfter.Keys | Where-Object { -not $fsBefore.ContainsKey($_) }
-
-    if ($newDirs) {
-        foreach ($dir in $newDirs) {
-            Write-Log "NEW DIR  : $dir" 'SUCCESS'
-        }
-    } else {
-        Write-Log "No new top-level directories detected in watched paths." 'WARN'
+    $sf = "$env:TEMP\PKG_$stream.txt"
+    if (Test-Path $sf) {
+        $sc = Get-Content $sf -Raw -ErrorAction SilentlyContinue
+        if ($sc -and $sc.Trim()) { Write-Log "[$stream]: $($sc.Trim())" }
+        Remove-Item $sf -Force -ErrorAction SilentlyContinue
     }
 }
 
 # ==============================================================================
-# REGION: EXIT CODE TRANSLATION
-# ------------------------------------------------------------------------------
-# [CHANGE ME] - Add any vendor-specific exit codes you encounter here.
-#               Some applications use non-standard exit codes for things like
-#               "already installed" or "reboot needed" that differ from MSI.
+# REGION: POST-INSTALL ANALYSIS
 # ==============================================================================
+Write-Host ""
+Write-Host "  Analysing changes — please wait..." -ForegroundColor DarkGray
+
+# ── Registry diff ─────────────────────────────────────────────────────────────
+$regAfter   = Get-RegistrySnapshot
+$newRegKeys = @($regAfter.Keys | Where-Object { -not $regBefore.ContainsKey($_) })
+
+# ── Filesystem diff ───────────────────────────────────────────────────────────
+$fsAfter    = Get-FilesystemSnapshot
+$newFSRoots = @($fsAfter.Keys | Where-Object { -not $fsBefore.ContainsKey($_) })
+
+# Files inside brand-new top-level dirs (full recursive list)
+$newFiles = [System.Collections.Generic.List[string]]::new()
+foreach ($entry in $newFSRoots) {
+    if (Test-Path $entry -PathType Container) {
+        Get-ChildItem $entry -Recurse -File -ErrorAction SilentlyContinue |
+            ForEach-Object { $newFiles.Add($_.FullName) }
+    } else {
+        $newFiles.Add($entry)
+    }
+}
+
+# Files modified inside pre-existing dirs (written after $StartTime)
+$modifiedFiles = [System.Collections.Generic.List[string]]::new()
+$touchedDirs   = @($fsAfter.Keys | Where-Object {
+    $fsBefore.ContainsKey($_) -and $fsAfter[$_] -gt $StartTime
+})
+foreach ($dir in $touchedDirs) {
+    if (Test-Path $dir -PathType Container) {
+        Get-ChildItem $dir -Recurse -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.LastWriteTime -gt $StartTime } |
+            ForEach-Object { $modifiedFiles.Add($_.FullName) }
+    }
+}
+
+# ==============================================================================
+# REGION: FULL CONSOLE REPORT
+# ==============================================================================
+Show-Banner
+Write-ReportHeader "INSTALLATION REPORT  —  $InstallerName"
+
+# ── Exit code ─────────────────────────────────────────────────────────────────
+Write-ReportSection "EXIT CODE"
 $exitMeaning = switch ($exitCode) {
     0    { 'Success' }
     1    { 'General error' }
     2    { 'File not found or bad arguments' }
     3010 { 'Success — REBOOT REQUIRED' }
     1602 { 'User cancelled the installation' }
-    1603 { 'Fatal error during MSI installation — check MSI log' }
-    1618 { 'Another MSI installation is already in progress' }
-    1619 { 'Installation package could not be opened' }
+    1603 { 'Fatal MSI error — check MSI log' }
+    1618 { 'Another MSI install already in progress' }
+    1619 { 'Package could not be opened' }
     1624 { 'Error applying transforms' }
-    1638 { 'Another version of this app is already installed' }
+    1638 { 'Another version already installed' }
     1641 { 'Reboot initiated by installer' }
     # [CHANGE ME] - Add vendor-specific codes below as you encounter them.
     # Example: 5 { 'Vendor XYZ: License validation failed' }
-    default { "Unknown exit code — consult installer documentation" }
+    default { 'Unknown — consult installer documentation' }
+}
+$codeColor = if ($exitCode -in @(0, 3010, 1641)) { 'Green' } else { 'Red' }
+Write-ReportItem '>' "Exit Code  : $exitCode" $codeColor
+Write-ReportItem '>' "Meaning    : $exitMeaning" $codeColor
+
+# ── Registry ──────────────────────────────────────────────────────────────────
+Write-ReportSection "REGISTRY  —  NEW UNINSTALL KEYS  ($($newRegKeys.Count) found)"
+
+if ($newRegKeys.Count -gt 0) {
+    foreach ($key in $newRegKeys) {
+        $kd         = $regAfter[$key]
+        $dispName   = $kd.GetValue('DisplayName')
+        $dispVer    = $kd.GetValue('DisplayVersion')
+        $publisher  = $kd.GetValue('Publisher')
+        $installDir = $kd.GetValue('InstallLocation')
+        $uninstall  = $kd.GetValue('UninstallString')
+
+        Write-ReportItem '[REG]' $key 'Green'
+        if ($dispName)   { Write-ReportSubItem "DisplayName     : $dispName  <-- use as `"*$dispName*`" in detection scripts" 'Cyan' }
+        if ($dispVer)    { Write-ReportSubItem "DisplayVersion  : $dispVer" 'White' }
+        if ($publisher)  { Write-ReportSubItem "Publisher       : $publisher" 'Gray' }
+        if ($installDir) { Write-ReportSubItem "InstallLocation : $installDir" 'Gray' }
+        if ($uninstall)  { Write-ReportSubItem "UninstallString : $uninstall" 'DarkGray' }
+
+        # All remaining values
+        $kd.GetValueNames() | Where-Object {
+            $_ -notin @('DisplayName','DisplayVersion','Publisher','InstallLocation','UninstallString','')
+        } | ForEach-Object {
+            Write-ReportSubItem "$_  =  $($kd.GetValue($_))" 'DarkGray'
+        }
+        Write-Host ""
+    }
+} else {
+    Write-ReportItem '!' "No new uninstall keys detected." 'Yellow'
+    Write-ReportSubItem "App may not register in standard hives — use File detection in Intune." 'DarkYellow'
 }
 
-Write-Log "Exit Code Translation: $exitCode = $exitMeaning" $(
-    if ($exitCode -in @(0, 3010, 1641)) { 'SUCCESS' } else { 'ERROR' }
-)
+# ── New files ─────────────────────────────────────────────────────────────────
+Write-ReportSection "FILES  —  NEW FILES IN NEW DIRECTORIES  ($($newFiles.Count) found)"
 
-Write-Log "===== WATCH-INSTALL COMPLETE — Log saved to: $LogPath ====="
+if ($newFiles.Count -gt 0) {
+    $newFiles | Group-Object -Property { Split-Path $_ -Parent } | ForEach-Object {
+        Write-ReportItem '[DIR]' $_.Name 'Green'
+        $_.Group | ForEach-Object { Write-ReportSubItem (Split-Path $_ -Leaf) 'White' }
+        Write-Host ""
+    }
+} else {
+    Write-ReportItem '!' "No new top-level install directories detected." 'Yellow'
+}
+
+# ── Modified files ────────────────────────────────────────────────────────────
+Write-ReportSection "FILES  —  MODIFIED FILES IN EXISTING DIRECTORIES  ($($modifiedFiles.Count) found)"
+
+if ($modifiedFiles.Count -gt 0) {
+    $modifiedFiles | Group-Object -Property { Split-Path $_ -Parent } | ForEach-Object {
+        Write-ReportItem '[MOD]' $_.Name 'DarkCyan'
+        $_.Group | ForEach-Object { Write-ReportSubItem (Split-Path $_ -Leaf) 'Gray' }
+        Write-Host ""
+    }
+} else {
+    Write-ReportItem 'o' "No modified files detected in existing directories." 'DarkGray'
+}
+
+# ── Summary ───────────────────────────────────────────────────────────────────
+Write-ReportSection "SUMMARY"
+Write-ReportItem '>' "Installer       : $InstallerName" 'White'
+Write-ReportItem '>' "Arguments       : $(if ($Arguments) { $Arguments } else { '(none)' })" 'White'
+Write-ReportItem '>' "Exit Code       : $exitCode  ($exitMeaning)" $codeColor
+Write-ReportItem '>' "New Reg Keys    : $($newRegKeys.Count)" $(if ($newRegKeys.Count -gt 0) { 'Green' } else { 'Yellow' })
+Write-ReportItem '>' "New Files       : $($newFiles.Count)" $(if ($newFiles.Count -gt 0) { 'Green' } else { 'Yellow' })
+Write-ReportItem '>' "Modified Files  : $($modifiedFiles.Count)" $(if ($modifiedFiles.Count -gt 0) { 'Cyan' } else { 'DarkGray' })
+Write-ReportItem '>' "Log saved to    : $script:LogPath" 'DarkGray'
+
+Write-Host ""
+Write-Host "  ════════════════════════════════════════════════════════════" -ForegroundColor DarkCyan
+Write-Host "  Report complete. Press Enter to exit." -ForegroundColor DarkGray
+Read-Host | Out-Null
