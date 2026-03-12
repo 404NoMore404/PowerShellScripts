@@ -13,9 +13,42 @@
 #
 # Workflow : Watch-Install.ps1  ->  Watch-Uninstall.ps1  ->  Compare-WatchReports.ps1
 #
+# Pair with: Watch-Install.ps1 (v1.6+), Compare-WatchReports.ps1
+#
 # Author   : [CHANGE ME] - Your Name / Team Name
-# Version  : 1.0
+# Version  : 1.1
 # Changelog:
+#   1.1 - Fixed three JSON field-path bugs introduced when Watch-Install.ps1
+#         moved to the v1.6 schema. All three caused the uninstall string to
+#         read as null and the registry/file tracking to silently fail:
+#
+#         (1) $installerData.AppName and .AppVersion no longer exist at the
+#             top level of the v1.6 JSON. They are now under .Meta.AppName and
+#             .AppInfo.DisplayVersion respectively. Fixed to read from the
+#             correct paths.
+#
+#         (2) $installerData.RegistryData (a flat hashtable keyed by path)
+#             was removed in v1.6 and replaced by .RegistryKeysAdded, an array
+#             of {Path, Values} objects. The UninstallString lookup used
+#             $regDataObj.PSObject.Properties[$firstKey] where $firstKey was
+#             the whole PSCustomObject, not a string key — always returning
+#             null. Fixed to read directly from
+#             $installerData.AppInfo.UninstallString, which is the canonical
+#             location in v1.6.
+#
+#         (3) $installedReg was set to @($installerData.RegistryKeysAdded),
+#             giving an array of {Path, Values} PSCustomObjects. Downstream
+#             Test-Path calls received whole objects instead of path strings,
+#             always failing silently. Fixed to extract .Path strings:
+#             @($installerData.RegistryKeysAdded | ForEach-Object { $_.Path })
+#
+#         NOTE on Add/Remove Programs: option [U] — "Use detected uninstall
+#         string" — already behaves identically to clicking Uninstall in
+#         Windows Settings / Add/Remove Programs. It parses and launches the
+#         UninstallString from the installer JSON directly, with no file picker
+#         required. Now that the UninstallString is correctly read this path
+#         works as intended.
+#
 #   1.0 - Initial release. Loads Watch_Installer JSON, detects UninstallString
 #         from stored registry data, runs uninstaller, then checks every file
 #         and registry key from the installer record to determine what was
@@ -61,10 +94,10 @@ function Write-Log {
 function Show-Banner {
     Clear-Host
     Write-Host ""
-    Write-Host "  +============================================================+" -ForegroundColor Cyan
-    Write-Host "  |         WATCH-UNINSTALL  v1.0  -- Intune Packager           |" -ForegroundColor Cyan
-    Write-Host "  |  Monitors what the uninstaller removes vs what it leaves    |" -ForegroundColor Cyan
-    Write-Host "  +============================================================+" -ForegroundColor Cyan
+    Write-Host "  ╔══════════════════════════════════════════════════════════╗" -ForegroundColor Magenta
+    Write-Host "  ║         WATCH-UNINSTALL  v1.1  -- Intune Packager        ║" -ForegroundColor Magenta
+    Write-Host "  ║  Monitors what the uninstaller removes vs what it leaves  ║" -ForegroundColor Magenta
+    Write-Host "  ╚══════════════════════════════════════════════════════════╝" -ForegroundColor Magenta
     Write-Host ""
 }
 
@@ -73,17 +106,18 @@ function Show-Banner {
 # ==============================================================================
 function Write-ReportHeader {
     param([string]$Title)
+    $line = '─' * 62
     Write-Host ""
-    Write-Host "  +------------------------------------------------------------------+" -ForegroundColor Cyan
-    Write-Host ("  |  {0,-66}|" -f $Title) -ForegroundColor Cyan
-    Write-Host "  +------------------------------------------------------------------+" -ForegroundColor Cyan
+    Write-Host "  ┌$line┐" -ForegroundColor Magenta
+    Write-Host ("  │  {0,-60}│" -f $Title) -ForegroundColor Magenta
+    Write-Host "  └$line┘" -ForegroundColor Magenta
 }
 
 function Write-ReportSection {
     param([string]$Label)
     Write-Host ""
-    Write-Host "  -- $Label " -ForegroundColor DarkCyan -NoNewline
-    Write-Host ('-' * ([Math]::Max(2, 56 - $Label.Length))) -ForegroundColor DarkGray
+    Write-Host "  ── $Label " -ForegroundColor DarkMagenta -NoNewline
+    Write-Host ('─' * ([Math]::Max(2, 58 - $Label.Length))) -ForegroundColor DarkGray
 }
 
 function Write-ReportItem {
@@ -156,10 +190,38 @@ catch {
     exit 1
 }
 
-$appName        = $installerData.AppName
-$appVersion     = $installerData.AppVersion
+# ------------------------------------------------------------------------------
+# FIX (v1.1): All three field paths below were broken for v1.6 JSON.
+#
+# v1.6 schema locations:
+#   App display name   -> .AppInfo.DisplayName   (human-readable, e.g. "Google Chrome")
+#   App version        -> .AppInfo.DisplayVersion
+#   Safe/sanitized name-> .Meta.AppName          (used for filenames, e.g. "Google_Chrome")
+#   UninstallString    -> .AppInfo.UninstallString
+#   Registry key paths -> .RegistryKeysAdded[].Path  (array of {Path, Values} objects)
+#   New files list     -> .NewFiles              (unchanged, still top-level array)
+# ------------------------------------------------------------------------------
+$appName        = $installerData.AppInfo.DisplayName
+$appVersion     = $installerData.AppInfo.DisplayVersion
+$safeAppName    = $installerData.Meta.AppName
+
+# Fallback: if AppInfo is missing (older JSON), try top-level fields
+if (-not $appName)    { $appName    = $installerData.AppName }
+if (-not $appVersion) { $appVersion = $installerData.AppVersion }
+if (-not $safeAppName) {
+    $safeAppName = ($appName -replace '[^a-zA-Z0-9]+', '_').Trim('_')
+}
+
 $installedFiles = @($installerData.NewFiles)
-$installedReg   = @($installerData.RegistryKeysAdded)
+
+# FIX (v1.1): Extract .Path strings from RegistryKeysAdded array.
+# Previously set to @($installerData.RegistryKeysAdded) which gave {Path,Values}
+# objects — Test-Path on those always fails silently.
+$installedReg = @(
+    $installerData.RegistryKeysAdded |
+    Where-Object { $_.Path } |
+    ForEach-Object { $_.Path }
+)
 
 Write-Host "  OK  Loaded: $appName $appVersion" -ForegroundColor Green
 Write-Host "      Files tracked   : $($installedFiles.Count)" -ForegroundColor DarkGray
@@ -169,15 +231,17 @@ Write-Host ""
 # -- Step 2: Determine uninstall method ----------------------------------------
 Write-Host "  STEP 2 -- Uninstall method" -ForegroundColor White
 
-# Extract UninstallString from the stored registry data (PSCustomObject property access)
-$uninstallString = $null
-$regDataObj      = $installerData.RegistryData
+# FIX (v1.1): UninstallString is now at .AppInfo.UninstallString in v1.6 JSON.
+# The old code looked it up through $installerData.RegistryData (removed in v1.6)
+# using the full PSCustomObject as a hashtable key — always returning null.
+$uninstallString = $installerData.AppInfo.UninstallString
 
-if ($regDataObj -and $installedReg.Count -gt 0) {
-    $firstKey  = $installedReg[0]
-    $keyEntry  = $regDataObj.PSObject.Properties[$firstKey]
-    if ($keyEntry) {
-        $uninstallString = $keyEntry.Value.UninstallString
+# Fallback: scan RegistryKeysAdded[].Values for an UninstallString in case
+# AppInfo is missing or empty (handles edge cases where registry had no key).
+if (-not $uninstallString -and $installerData.RegistryKeysAdded) {
+    foreach ($regEntry in $installerData.RegistryKeysAdded) {
+        $candidate = $regEntry.Values.UninstallString
+        if ($candidate) { $uninstallString = $candidate; break }
     }
 }
 
@@ -188,7 +252,9 @@ if ($uninstallString) {
     Write-Host "  Detected UninstallString:" -ForegroundColor DarkGray
     Write-Host "  $uninstallString" -ForegroundColor White
     Write-Host ""
-    Write-Host "  [U] Use detected string (default)   [B] Browse   [M] Manual entry" -ForegroundColor DarkGray
+    Write-Host "  [U] Use detected string — same as Add/Remove Programs (default)" -ForegroundColor DarkGray
+    Write-Host "  [B] Browse for a different uninstaller exe" -ForegroundColor DarkGray
+    Write-Host "  [M] Type path manually" -ForegroundColor DarkGray
     Write-Host ""
     Write-Host "  Choice > " -ForegroundColor White -NoNewline
     $methodChoice = (Read-Host).Trim()
@@ -203,6 +269,7 @@ if ($uninstallString) {
 }
 
 if ($methodChoice -match '^[Uu]' -and $uninstallString) {
+    # Parse quoted path + trailing args, or unquoted exe + trailing args
     if ($uninstallString -match '^"([^"]+)"\s*(.*)$') {
         $UninstallerPath = $Matches[1]
         $Arguments       = $Matches[2].Trim()
@@ -214,6 +281,7 @@ if ($methodChoice -match '^[Uu]' -and $uninstallString) {
     }
     Write-Host "  OK  Using: $UninstallerPath" -ForegroundColor Green
     if ($Arguments) { Write-Host "      Args : $Arguments" -ForegroundColor DarkGray }
+    Write-Host "      (Equivalent to clicking Uninstall in Add/Remove Programs)" -ForegroundColor DarkGray
 
 } elseif ($methodChoice -match '^[Bb]') {
     $browseStart     = if ($installedFiles.Count -gt 0) { Split-Path $installedFiles[0] -Parent } else { $env:ProgramFiles }
@@ -238,7 +306,7 @@ Write-Host ""
 # -- Step 3: Optional extra arguments ------------------------------------------
 Write-Host "  STEP 3 -- Additional uninstall arguments (optional)" -ForegroundColor White
 Write-Host "  Current: $(if ($Arguments) { $Arguments } else { '(none)' })" -ForegroundColor DarkGray
-Write-Host "  Add more, or press Enter to keep as-is" -ForegroundColor DarkGray
+Write-Host "  Add more args, or press Enter to keep as-is" -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "  Extra args > " -ForegroundColor White -NoNewline
 $extraArgs = (Read-Host).Trim()
@@ -247,25 +315,25 @@ Write-Host ""
 
 # -- Step 4: Confirm -----------------------------------------------------------
 $uninstallerName = Split-Path $UninstallerPath -Leaf
-$disp_app        = 'App        : ' + ($appName -replace '(.{40}).+', '$1...')
-$disp_uninst     = 'Uninstaller: ' + ($uninstallerName -replace '(.{40}).+', '$1...')
-$disp_args       = 'Arguments  : ' + $(if ($Arguments) { $Arguments } else { '(none - GUI mode)' })
-$disp_track      = 'Tracking   : ' + "$($installedFiles.Count) files, $($installedReg.Count) reg keys"
+$disp_app    = 'App        : ' + ($appName -replace '(.{40}).+', '$1...')
+$disp_uninst = 'Uninstaller: ' + ($uninstallerName -replace '(.{40}).+', '$1...')
+$disp_args   = 'Arguments  : ' + $(if ($Arguments) { $Arguments } else { '(none - GUI mode)' })
+$disp_track  = 'Tracking   : ' + "$($installedFiles.Count) files, $($installedReg.Count) reg keys"
 
-Write-Host "  +----------------------------------------------------------+" -ForegroundColor DarkCyan
-Write-Host ("  |  {0,-56}|" -f 'READY TO UNINSTALL')   -ForegroundColor DarkCyan
-Write-Host ("  |  {0,-56}|" -f '')                      -ForegroundColor DarkCyan
-Write-Host ("  |  {0,-56}|" -f $disp_app)               -ForegroundColor White
-Write-Host ("  |  {0,-56}|" -f $disp_uninst)            -ForegroundColor White
-Write-Host ("  |  {0,-56}|" -f $disp_args)              -ForegroundColor White
-Write-Host ("  |  {0,-56}|" -f $disp_track)             -ForegroundColor White
-Write-Host "  +----------------------------------------------------------+" -ForegroundColor DarkCyan
+Write-Host "  ┌──────────────────────────────────────────────────────────┐" -ForegroundColor DarkMagenta
+Write-Host ("  │  {0,-56}│" -f 'READY TO UNINSTALL')   -ForegroundColor DarkMagenta
+Write-Host ("  │  {0,-56}│" -f '')                      -ForegroundColor DarkMagenta
+Write-Host ("  │  {0,-56}│" -f $disp_app)               -ForegroundColor White
+Write-Host ("  │  {0,-56}│" -f $disp_uninst)            -ForegroundColor White
+Write-Host ("  │  {0,-56}│" -f $disp_args)              -ForegroundColor White
+Write-Host ("  │  {0,-56}│" -f $disp_track)             -ForegroundColor White
+Write-Host "  └──────────────────────────────────────────────────────────┘" -ForegroundColor DarkMagenta
 Write-Host ""
 Write-Host "  Press Enter to start  |  Ctrl+C to cancel" -ForegroundColor DarkGray
 Read-Host | Out-Null
 
 # -- Step 5: Init log ----------------------------------------------------------
-Write-Log "===== WATCH-UNINSTALL v1.0 STARTED ====="
+Write-Log "===== WATCH-UNINSTALL v1.1 STARTED ====="
 Write-Log "App         : $appName $appVersion"
 Write-Log "Uninstaller : $UninstallerPath"
 Write-Log "Arguments   : $(if ($Arguments) { $Arguments } else { '(none)' })"
@@ -297,7 +365,7 @@ foreach ($key in $installedReg) {
 
 Write-Log "Pre-check: $($filesExistBefore.Count)/$($installedFiles.Count) files present, $($regExistBefore.Count)/$($installedReg.Count) reg keys present"
 if ($filesMissingBefore.Count -gt 0) {
-    Write-Host "  NOTE: $($filesMissingBefore.Count) tracked files already missing before uninstall (may have been updated/moved)." -ForegroundColor Yellow
+    Write-Host "  NOTE: $($filesMissingBefore.Count) tracked file(s) already missing before uninstall (updated/moved)." -ForegroundColor Yellow
 }
 
 # -- Step 7: Launch uninstaller -----------------------------------------------
@@ -377,7 +445,7 @@ foreach ($key in $regExistBefore) {
 Write-Log "Files removed: $($filesRemoved.Count)  |  Files remaining: $($filesRemaining.Count)"
 Write-Log "Reg removed: $($regRemoved.Count)  |  Reg remaining: $($regRemaining.Count)"
 
-# -- Step 9: Auto-save Watch_Uninstaller JSON ---------------------------------
+# -- Step 9: Exit code lookup --------------------------------------------------
 $exitMeaning = switch ($exitCode) {
     0    { 'Success' }
     1    { 'General error' }
@@ -388,25 +456,33 @@ $exitMeaning = switch ($exitCode) {
     1605 { 'App not currently installed (MSI)' }
     1614 { 'Product uninstalled' }
     1641 { 'Reboot initiated by uninstaller' }
+    # [CHANGE ME] - Add vendor-specific codes below as you encounter them.
     default { 'Unknown - consult uninstaller documentation' }
 }
+$codeColor = if ($exitCode -in @(0, 3010, 1614, 1641)) { 'Green' } else { 'Red' }
 
-$safeAppName        = $appName -replace '[\\/:*?"<>|\s]', '_'
+# -- Step 10: Auto-save Watch_Uninstaller JSON ---------------------------------
 $watchUninstallDir  = Split-Path $installerJsonPath -Parent
 $watchUninstallFile = Join-Path $watchUninstallDir "Watch_Uninstaller_${safeAppName}.json"
 
 $uninstallRecord = [ordered]@{
-    Schema                      = 'WatchUninstall/1.0'
-    AppName                     = $appName
-    AppVersion                  = $appVersion
-    UninstallerFile             = $uninstallerName
-    UninstallerPath             = $UninstallerPath
-    Arguments                   = $Arguments
-    UninstallDate               = (Get-Date -Format 'yyyy-MM-dd')
-    UninstallTimestamp          = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
-    ExitCode                    = $exitCode
-    ExitMeaning                 = $exitMeaning
-    InstallerJsonPath           = $installerJsonPath
+    Type                        = 'Uninstall'
+    GeneratedAt                 = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+    Meta = [ordered]@{
+        ScriptVersion           = '1.1'
+        AppName                 = $safeAppName
+        UninstallerPath         = $UninstallerPath
+        UninstallerFile         = $uninstallerName
+        Arguments               = $Arguments
+        ExitCode                = $exitCode
+        ExitMeaning             = $exitMeaning
+        IMELog                  = $script:LogPath
+        InstallerJsonPath       = $installerJsonPath
+    }
+    AppInfo = [ordered]@{
+        DisplayName             = $appName
+        DisplayVersion          = $appVersion
+    }
     FilesTrackedFromInstaller   = $installedFiles.Count
     FilesRemoved                = @($filesRemoved)
     FilesRemaining              = @($filesRemaining)
@@ -417,7 +493,8 @@ $uninstallRecord = [ordered]@{
 }
 
 try {
-    $uninstallRecord | ConvertTo-Json -Depth 10 | Set-Content -Path $watchUninstallFile -Encoding UTF8 -ErrorAction Stop
+    $uninstallRecord | ConvertTo-Json -Depth 10 |
+        Set-Content -Path $watchUninstallFile -Encoding UTF8 -ErrorAction Stop
     Write-Log "Watch_Uninstaller data saved to: $watchUninstallFile"
 }
 catch {
@@ -430,8 +507,6 @@ catch {
 Show-Banner
 Write-ReportHeader "UNINSTALL REPORT  --  $appName $appVersion"
 
-$codeColor = if ($exitCode -in @(0, 3010, 1614, 1641)) { 'Green' } else { 'Red' }
-
 Write-ReportSection "EXIT CODE"
 Write-ReportItem '>' "Exit Code  : $exitCode" $codeColor
 Write-ReportItem '>' "Meaning    : $exitMeaning" $codeColor
@@ -443,7 +518,7 @@ if ($regRemoved.Count -gt 0) {
     Write-ReportItem '!' "No registry keys were removed." 'Yellow'
 }
 
-Write-ReportSection "REGISTRY  --  REMAINING (NOT CLEANED UP)  ($($regRemaining.Count))"
+Write-ReportSection "REGISTRY  --  REMAINING / NOT CLEANED UP  ($($regRemaining.Count))"
 if ($regRemaining.Count -gt 0) {
     foreach ($key in $regRemaining) { Write-ReportItem '[LEFT]' $key 'Red' }
     Write-Host ""
@@ -463,7 +538,7 @@ if ($filesRemoved.Count -gt 0) {
     Write-ReportItem '!' "No tracked files were removed." 'Yellow'
 }
 
-Write-ReportSection "FILES  --  REMAINING (NOT CLEANED UP)  ($($filesRemaining.Count))"
+Write-ReportSection "FILES  --  REMAINING / NOT CLEANED UP  ($($filesRemaining.Count))"
 if ($filesRemaining.Count -gt 0) {
     $filesRemaining | Group-Object -Property { Split-Path $_ -Parent } | ForEach-Object {
         Write-ReportItem '[LEFT]' $_.Name 'Red'
@@ -471,7 +546,7 @@ if ($filesRemaining.Count -gt 0) {
         Write-Host ""
     }
     Write-ReportSubItem "These files were installed but NOT removed by the uninstaller." 'Yellow'
-    Write-ReportSubItem "Run Compare-WatchReports.ps1 for the full diff report." 'DarkGray'
+    Write-ReportSubItem "Run Compare-WatchReports.ps1 for the full leftover diff report." 'DarkGray'
 } else {
     Write-ReportItem 'OK' "All tracked files were removed. Clean uninstall." 'Green'
 }
@@ -488,9 +563,9 @@ Write-ReportItem '>' "Watch data file : $watchUninstallFile" 'DarkGray'
 Write-ReportItem '>' "Log saved to    : $script:LogPath" 'DarkGray'
 
 Write-Host ""
-Write-Host "  ============================================================" -ForegroundColor DarkCyan
+Write-Host "  ════════════════════════════════════════════════════════════" -ForegroundColor DarkMagenta
 
-# -- Save report prompt --------------------------------------------------------
+# -- Optional text report save -------------------------------------------------
 Write-Host ""
 Write-Host "  Save a copy of this report to a text file?" -ForegroundColor White
 Write-Host "  [Y] Yes (default)   [N] No  -- then press Enter" -ForegroundColor DarkGray
@@ -500,9 +575,8 @@ $saveChoice = (Read-Host).Trim()
 if ([string]::IsNullOrEmpty($saveChoice)) { $saveChoice = 'Y' }
 
 if ($saveChoice -match '^[Yy]') {
-    $safeName    = $appName -replace '[\\/:*?"<>|\s]', '_'
     $dateStamp   = Get-Date -Format 'yyyyMMdd'
-    $defaultName = "${safeName}_${dateStamp}_UninstallReport.txt"
+    $defaultName = "${safeAppName}_${dateStamp}_UninstallReport.txt"
 
     Add-Type -AssemblyName System.Windows.Forms | Out-Null
     $saveDialog                  = New-Object System.Windows.Forms.SaveFileDialog
@@ -512,7 +586,7 @@ if ($saveChoice -match '^[Yy]') {
     $saveDialog.FileName         = $defaultName
     $saveDialog.InitialDirectory = $watchUninstallDir
 
-    $owner        = New-Object System.Windows.Forms.Form
+    $owner         = New-Object System.Windows.Forms.Form
     $owner.TopMost = $true
     $dialogResult  = $saveDialog.ShowDialog($owner)
     $owner.Dispose()
@@ -521,7 +595,7 @@ if ($saveChoice -match '^[Yy]') {
         $savePath    = $saveDialog.FileName
         $reportLines = [System.Collections.Generic.List[string]]::new()
 
-        $reportLines.Add("WATCH-UNINSTALL v1.0 - UNINSTALL REPORT")
+        $reportLines.Add("WATCH-UNINSTALL v1.1 - UNINSTALL REPORT")
         $reportLines.Add("Generated        : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')")
         $reportLines.Add("App              : $appName $appVersion")
         $reportLines.Add("Uninstaller      : $UninstallerPath")
@@ -575,10 +649,15 @@ if ($saveChoice -match '^[Yy]') {
         $reportLines.Add("  Watch data file : $watchUninstallFile")
         $reportLines.Add("  IME Log         : $script:LogPath")
 
-        $reportLines | Set-Content -Path $savePath -Encoding UTF8 -ErrorAction Stop
-        Write-Host ""
-        Write-Host "  OK  Report saved to: $savePath" -ForegroundColor Green
-        Write-Log "Report saved to: $savePath"
+        try {
+            $reportLines | Set-Content -Path $savePath -Encoding UTF8 -ErrorAction Stop
+            Write-Host ""
+            Write-Host "  OK  Report saved to: $savePath" -ForegroundColor Green
+            Write-Log "Report saved to: $savePath"
+        } catch {
+            Write-Host "  ERROR  Could not save report: $_" -ForegroundColor Red
+            Write-Log "Report save failed: $_" 'ERROR'
+        }
     } else {
         Write-Host ""
         Write-Host "  Save cancelled." -ForegroundColor DarkGray
