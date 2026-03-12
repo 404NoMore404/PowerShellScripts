@@ -82,6 +82,26 @@ Function Write-Log {
 }
 
 ###########################################################################################
+# PROMPT HELPER
+# Displays a Y/N question with Y as the default (press Enter = Yes)
+###########################################################################################
+
+Function Read-YN {
+    param(
+        [string]$Prompt,
+        [switch]$DefaultNo   # Pass -DefaultNo to flip the default to N
+    )
+    $Indicator = if ($DefaultNo) { "[y/N]" } else { "[Y/n]" }
+    Write-Host "  $Prompt $Indicator : " -ForegroundColor Cyan -NoNewline
+    $Answer = (Read-Host).Trim()
+    if ($DefaultNo) {
+        return ($Answer -match '^[Yy]')
+    } else {
+        return ($Answer -eq '' -or $Answer -match '^[Yy]')
+    }
+}
+
+###########################################################################################
 # REGISTRY DISCOVERY
 # Searches all standard uninstall registry hives for matching apps
 ###########################################################################################
@@ -282,8 +302,7 @@ Function Main {
             Write-Host "  [!] No applications found matching '$SearchTerm'." -ForegroundColor Yellow
             Write-Host "      Try a shorter or different search term." -ForegroundColor DarkGray
             Write-Host ""
-            $Retry = Read-Host "  Search again? (Y/N)"
-            if ($Retry -notmatch '^[Yy]') { exit 0 }
+            if (-not (Read-YN "Search again?")) { exit 0 }
             continue
         }
 
@@ -323,14 +342,11 @@ Function Main {
         ###################################################################################
 
         if ($FoundApps.Count -eq 1) {
-            Write-Host "  Only one match found. Select it? (Y) or search again (S) or exit (N)" -ForegroundColor Cyan
-            $Pick = Read-Host "  Choice"
-            if ($Pick -match '^[Yy]') {
+            Write-Host "  Only one match found." -ForegroundColor Cyan
+            if (Read-YN "Select and continue?") {
                 $SelectedApp   = $FoundApps[0]
                 $UninstallInfo = Resolve-UninstallMethod -App $SelectedApp
-            }
-            elseif ($Pick -match '^[Ss]') { continue }
-            else { exit 0 }
+            } else { exit 0 }
         }
         else {
             Write-Host "  Enter the number of the app to uninstall, or (S) to search again, or (N) to exit:" -ForegroundColor Cyan
@@ -411,9 +427,7 @@ Function Main {
     # For medium-confidence EXE, offer to edit the arguments
     if ($UninstallInfo.Type -eq "EXE" -and $UninstallInfo.Confidence -ne "High") {
         Write-Host "  The silent arguments '$($UninstallInfo.ExeArgs)' were guessed." -ForegroundColor Yellow
-        Write-Host "  Edit them now? (Y to edit, N to keep as-is):" -ForegroundColor Cyan
-        $EditArgs = Read-Host "  Choice"
-        if ($EditArgs -match '^[Yy]') {
+        if (Read-YN "Edit arguments now? (N = keep as-is)" -DefaultNo) {
             Write-Host "  Current: $($UninstallInfo.ExeArgs)" -ForegroundColor Gray
             $NewArgs = Read-Host "  New arguments"
             if (-not [string]::IsNullOrWhiteSpace($NewArgs)) {
@@ -429,9 +443,7 @@ Function Main {
         exit 1
     }
 
-    Write-Host "  Proceed with uninstall? (Y/N):" -ForegroundColor Cyan
-    $Confirm = Read-Host "  Choice"
-    if ($Confirm -notmatch '^[Yy]') {
+    if (-not (Read-YN "Proceed with uninstall?")) {
         Write-Host "  Uninstall cancelled by user." -ForegroundColor Yellow
         exit 0
     }
@@ -484,9 +496,7 @@ Function Main {
     if (-not [string]::IsNullOrWhiteSpace($SelectedApp.InstallLocation) -and (Test-Path $SelectedApp.InstallLocation)) {
         Write-Host ""
         Write-Host "  Install folder still exists: $($SelectedApp.InstallLocation)" -ForegroundColor Yellow
-        Write-Host "  Remove it? (Y/N):" -ForegroundColor Cyan
-        $RemoveFolder = Read-Host "  Choice"
-        if ($RemoveFolder -match '^[Yy]') {
+        if (Read-YN "Remove it?") {
             try {
                 Remove-Item $SelectedApp.InstallLocation -Recurse -Force -ErrorAction Stop
                 Write-Log "Removed install folder: $($SelectedApp.InstallLocation)" "OK"
@@ -502,10 +512,9 @@ Function Main {
 
     # Ask about additional paths
     Write-Host ""
-    Write-Host "  Do you want to remove any additional folders or registry keys? (Y/N):" -ForegroundColor Cyan
-    $Extra = Read-Host "  Choice"
+    $RemoveExtra = (Read-YN "Remove any additional folders or registry keys?" -DefaultNo)
 
-    while ($Extra -match '^[Yy]') {
+    while ($RemoveExtra) {
         Write-Host "  Enter a full path to remove (folder or registry key), or leave blank to stop:" -ForegroundColor Cyan
         Write-Host "  Examples:  C:\ProgramData\MyApp   or   HKLM:\SOFTWARE\MyVendor\MyApp" -ForegroundColor DarkGray
         $ExtraPath = Read-Host "  Path"
@@ -525,8 +534,7 @@ Function Main {
             Write-Log "Path not found (may already be gone): $ExtraPath" "WARN"
         }
 
-        Write-Host "  Remove another path? (Y/N):" -ForegroundColor Cyan
-        $Extra = Read-Host "  Choice"
+        $RemoveExtra = (Read-YN "Remove another path?" -DefaultNo)
     }
 
     #######################################################################################
