@@ -25,14 +25,13 @@
 # ==============================================================================
 # REGION: SELF-ELEVATION
 # ==============================================================================
-if (-not ([Security.Principal.WindowsPrincipal]
-          [Security.Principal.WindowsIdentity]::GetCurrent()
-         ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+$currentUser    = [Security.Principal.WindowsIdentity]::GetCurrent()
+$currentPrincipal = New-Object Security.Principal.WindowsPrincipal($currentUser)
+$isAdmin        = $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 
+if (-not $isAdmin) {
     Write-Host "`n  Not running as Administrator — relaunching elevated...`n" -ForegroundColor Yellow
-    Start-Process powershell.exe `
-        -ArgumentList "-ExecutionPolicy Bypass -File `"$PSCommandPath`"" `
-        -Verb RunAs
+    Start-Process powershell.exe -ArgumentList "-ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
     exit
 }
 
