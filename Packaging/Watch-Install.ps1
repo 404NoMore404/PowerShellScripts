@@ -13,7 +13,14 @@
 #
 # Usage    : .\Watch-Install.ps1 -InstallerPath ".\setup.exe" -Arguments "/VERYSILENT" -WatchRegistry -WatchFiles
 # Author   : [CHANGE ME] - Your Name / Team Name
-# Version  : 1.1
+# Version  : 1.2
+# Changelog:
+#   1.2 - Fixed ArgumentList validation error when no arguments are supplied.
+#         Start-Process rejects an empty string for -ArgumentList; both the
+#         primary and fallback launch paths now only include ArgumentList when
+#         the caller actually provided a value. Resolves crash with stub
+#         installers (e.g. ChromeSetup.exe) that also reject stream redirection.
+#   1.1 - Initial tracked release.
 # ==============================================================================
 
 param(
@@ -145,12 +152,21 @@ $procParams = @{
 }
 
 if ($ext -eq '.msi') {
-    # MSI must be launched via msiexec, not directly
-    $procParams.FilePath     = 'msiexec.exe'
-    $procParams.ArgumentList = "/i `"$InstallerPath`" $Arguments"
+    # MSI must be launched via msiexec, not directly.
+    # /i "<path>" is always required; append caller-supplied args if provided.
+    $procParams.FilePath = 'msiexec.exe'
+    $msiArgs = "/i `"$InstallerPath`""
+    if ($Arguments) { $msiArgs += " $Arguments" }
+    $procParams.ArgumentList = $msiArgs
 } else {
-    $procParams.FilePath     = $InstallerPath
-    $procParams.ArgumentList = $Arguments
+    $procParams.FilePath = $InstallerPath
+    # FIX (v1.2): Only add ArgumentList when the caller actually supplied
+    # something. Start-Process throws a validation error if ArgumentList is
+    # an empty string, which crashes stub installers that also reject stream
+    # redirection (e.g. ChromeSetup.exe), preventing the fallback from working.
+    if ($Arguments) {
+        $procParams.ArgumentList = $Arguments
+    }
 }
 
 Write-Log "Launching installer..."
@@ -160,13 +176,24 @@ try {
     $proc = Start-Process @procParams -ErrorAction Stop
 }
 catch {
-    # Some installers reject stdout/stderr redirection (GUI-only installers).
+    # Some installers reject stdout/stderr redirection (GUI-only or stub installers).
     # Fall back to a plain launch and just capture the exit code.
     Write-Log "Redirected stdout/stderr launch failed. Falling back to direct launch (no stream capture)." 'WARN'
     Write-Log "Reason: $_" 'WARN'
-    $proc = Start-Process -FilePath $procParams.FilePath `
-                          -ArgumentList $procParams.ArgumentList `
-                          -Wait -PassThru
+
+    # FIX (v1.2): Build fallback params independently and only include
+    # ArgumentList if it was actually set in $procParams — avoids the same
+    # empty-string validation error that triggered the fallback in the first place.
+    $fallbackParams = @{
+        FilePath = $procParams.FilePath
+        Wait     = $true
+        PassThru = $true
+    }
+    if ($procParams.ContainsKey('ArgumentList')) {
+        $fallbackParams.ArgumentList = $procParams.ArgumentList
+    }
+
+    $proc = Start-Process @fallbackParams -ErrorAction Stop
 }
 
 $exitCode = $proc.ExitCode
