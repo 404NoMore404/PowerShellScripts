@@ -212,13 +212,18 @@ Write-Host "  Arguments > " -ForegroundColor White -NoNewline
 $Arguments = (Read-Host).Trim()
 Write-Host ""
 
-# ── Step 3: Confirm ───────────────────────────────────────────────────────────
+# ── Step 3: Confirm ─────────────────────────────────────────────────────────
+# Box interior is 58 chars wide. "  │  {0,-56}│" = 2+1+2+56+1 = 62 total.
+$fileDisplay  = 'File      : ' + ($InstallerName -replace '(.{41}).+', '$1...')
+$argsDisplay  = 'Arguments : ' + $(if ($Arguments) { $Arguments } else { '(none - GUI mode)' })
+$watchDisplay = 'Watching  : Registry + Filesystem (always on)'
+
 Write-Host "  ┌──────────────────────────────────────────────────────────┐" -ForegroundColor DarkCyan
-Write-Host "  │  READY TO INSTALL                                         │" -ForegroundColor DarkCyan
-Write-Host "  │                                                            │" -ForegroundColor DarkCyan
-Write-Host ("  │  File      : {0,-47}│" -f ($InstallerName -replace '(.{44}).+','$1...')) -ForegroundColor White
-Write-Host ("  │  Arguments : {0,-47}│" -f $(if ($Arguments) { $Arguments } else { '(none — GUI mode)' })) -ForegroundColor White
-Write-Host "  │  Watching  : Registry + Filesystem (always on)            │" -ForegroundColor White
+Write-Host ("  │  {0,-56}│" -f 'READY TO INSTALL')    -ForegroundColor DarkCyan
+Write-Host ("  │  {0,-56}│" -f '')                    -ForegroundColor DarkCyan
+Write-Host ("  │  {0,-56}│" -f $fileDisplay)          -ForegroundColor White
+Write-Host ("  │  {0,-56}│" -f $argsDisplay)          -ForegroundColor White
+Write-Host ("  │  {0,-56}│" -f $watchDisplay)         -ForegroundColor White
 Write-Host "  └──────────────────────────────────────────────────────────┘" -ForegroundColor DarkCyan
 Write-Host ""
 Write-Host "  Press Enter to start  |  Ctrl+C to cancel" -ForegroundColor DarkGray
