@@ -8,17 +8,36 @@
 #            OR: .\Watch-Install.ps1
 #
 # Author   : [CHANGE ME] - Your Name / Team Name
-# Version  : 1.3
+# Version  : 1.4
 # Changelog:
+#   1.4 - Added post-report save prompt (Y/N, default Y).
+#         Opens a WinForms SaveFileDialog with a pre-filled filename in the
+#         format <InstallerName>_<YYYYMMDD>_InstallReport.txt, defaulting to
+#         the user's Desktop. Saves full report as UTF-8 plain text including
+#         all registry key values, new files grouped by directory, modified
+#         files grouped by directory, and summary. Save path is written to
+#         the IME log for traceability.
+#         Fixed self-elevation block: replaced multi-line WindowsPrincipal cast
+#         that caused a PowerShell parser error with three explicit assignment
+#         statements (GetCurrent → WindowsPrincipal → IsInRole check).
 #   1.3 - Full interactive mode. Removed mandatory params and CLI switches.
-#         Script now self-elevates, opens a WinForms file picker, prompts for
-#         optional silent arguments, then always captures registry and file
-#         changes. Post-install report printed to console with full detail:
-#         all new registry keys/values and all new/modified files by path.
+#         Script now self-elevates, opens a WinForms OpenFileDialog to pick
+#         the installer (filtered to .exe/.msi/.msix/.appx, defaults to
+#         Downloads), prompts for optional silent arguments, then always
+#         enables -WatchRegistry and -WatchFiles — no flags required.
+#         Post-install report printed to console with full detail: all new
+#         registry keys with every value, new files grouped by directory
+#         (full recursive), and modified files in pre-existing directories
+#         grouped by directory (files written after install start time).
+#         Added Show-Banner, Write-ReportHeader, Write-ReportSection,
+#         Write-ReportItem, and Write-ReportSubItem helper functions for
+#         consistent styled console output.
 #   1.2 - Fixed ArgumentList validation error when no arguments are supplied.
 #         Start-Process rejects an empty string for -ArgumentList; both the
 #         primary and fallback launch paths now only include ArgumentList when
-#         the caller actually provided a value.
+#         the caller actually provided a value. Resolves crash with stub
+#         installers (e.g. ChromeSetup.exe) that also reject stream
+#         redirection, which previously made the fallback crash identically.
 #   1.1 - Initial tracked release.
 # ==============================================================================
 
@@ -60,7 +79,7 @@ function Show-Banner {
     Clear-Host
     Write-Host ""
     Write-Host "  ╔══════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
-    Write-Host "  ║           WATCH-INSTALL  v1.3  — Intune Packager         ║" -ForegroundColor Cyan
+    Write-Host "  ║           WATCH-INSTALL  v1.4  — Intune Packager         ║" -ForegroundColor Cyan
     Write-Host "  ║    Monitors registry + filesystem changes during install  ║" -ForegroundColor Cyan
     Write-Host "  ╚══════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
     Write-Host ""
@@ -206,7 +225,7 @@ Write-Host "  Press Enter to start  |  Ctrl+C to cancel" -ForegroundColor DarkGr
 Read-Host | Out-Null
 
 # ── Step 4: Init log ─────────────────────────────────────────────────────────
-Write-Log "===== WATCH-INSTALL v1.3 STARTED ====="
+Write-Log "===== WATCH-INSTALL v1.4 STARTED ====="
 Write-Log "Installer : $InstallerPath"
 Write-Log "Arguments : $(if ($Arguments) { $Arguments } else { '(none)' })"
 Write-Log "Log File  : $script:LogPath"
@@ -443,7 +462,7 @@ if ($saveChoice -match '^[Yy]') {
         $savePath    = $saveDialog.FileName
         $reportLines = [System.Collections.Generic.List[string]]::new()
 
-        $reportLines.Add("WATCH-INSTALL v1.3 - INSTALLATION REPORT")
+        $reportLines.Add("WATCH-INSTALL v1.4 - INSTALLATION REPORT")
         $reportLines.Add("Generated  : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')")
         $reportLines.Add("Installer  : $InstallerPath")
         $reportLines.Add("Arguments  : $(if ($Arguments) { $Arguments } else { '(none)' })")
