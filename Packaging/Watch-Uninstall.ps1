@@ -261,6 +261,76 @@ function Get-AppWatchRoots {
     return $roots
 }
 
+# Recursively searches common registry hives for any key whose path, name, or
+# value data contains the search term. Returns an array of match objects.
+function Search-RegistryRemnants {
+    param([string]$SearchTerm)
+
+    $searchRoots = @(
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall',
+        'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall',
+        'HKLM:\SOFTWARE',
+        'HKLM:\SOFTWARE\WOW6432Node',
+        'HKCU:\SOFTWARE',
+        'HKLM:\SYSTEM\CurrentControlSet\Services'
+    )
+
+    # Use first meaningful word (3+ chars) to reduce noise on short/generic names
+    $keyword = ($SearchTerm -split '\s+' | Where-Object { $_.Length -ge 3 } | Select-Object -First 1)
+    if (-not $keyword) { $keyword = $SearchTerm }
+
+    $results = [System.Collections.Generic.List[object]]::new()
+    $seen    = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+
+    foreach ($root in $searchRoots) {
+        if (-not (Test-Path $root -ErrorAction SilentlyContinue)) { continue }
+        try {
+            Get-ChildItem -Path $root -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
+                $keyPath = $_.PSPath
+
+                # Check if the key path itself contains the keyword
+                if ($keyPath -match [regex]::Escape($keyword)) {
+                    if ($seen.Add($keyPath)) {
+                        $results.Add([PSCustomObject]@{
+                            RegistryPath = $keyPath -replace '^Microsoft\.PowerShell\.Core\\Registry::', ''
+                            MatchType    = 'Key name'
+                            MatchDetail  = ''
+                        })
+                    }
+                }
+
+                # Check values within the key
+                try {
+                    $props = Get-ItemProperty -Path $keyPath -ErrorAction SilentlyContinue
+                    if ($props) {
+                        $props.PSObject.Properties |
+                            Where-Object { $_.Name -notmatch '^PS(Path|Drive|Provider|ChildName|ParentPath)$' } |
+                            ForEach-Object {
+                                $valName = $_.Name
+                                $valData = "$($_.Value)"
+                                $matchedVal = $valName -match [regex]::Escape($keyword) -or
+                                              $valData -match [regex]::Escape($keyword)
+                                if ($matchedVal) {
+                                    $dedupeKey = "$keyPath|$valName"
+                                    if ($seen.Add($dedupeKey)) {
+                                        $results.Add([PSCustomObject]@{
+                                            RegistryPath = $keyPath -replace '^Microsoft\.PowerShell\.Core\\Registry::', ''
+                                            MatchType    = 'Value'
+                                            MatchDetail  = "$valName = $($valData -replace '(.{60}).+','$1...')"
+                                        })
+                                    }
+                                }
+                            }
+                    }
+                } catch { }
+            }
+        } catch { }
+    }
+
+    return $results
+}
+
 # ==============================================================================
 # REGION: SHARED -- PARSE AND RUN UNINSTALLER
 # ==============================================================================
@@ -486,7 +556,7 @@ if ($modeChoice -eq 'A') {
     Write-Host "  Press Enter to start  |  Ctrl+C to cancel" -ForegroundColor DarkGray
     Read-Host | Out-Null
 
-    Write-Log "===== WATCH-UNINSTALL v2.0 [JSON MODE] STARTED ====="
+    Write-Log "===== WATCH-UNINSTALL v2.1 [JSON MODE] STARTED ====="
     Write-Log "App         : $appName $appVersion"
     Write-Log "Uninstaller : $UninstallerPath"
     Write-Log "Arguments   : $(if ($Arguments) { $Arguments } else { '(none)' })"
@@ -763,7 +833,7 @@ if ($modeChoice -eq 'A') {
     Write-Host "  Press Enter to start  |  Ctrl+C to cancel" -ForegroundColor DarkGray
     Read-Host | Out-Null
 
-    Write-Log "===== WATCH-UNINSTALL v2.0 [STANDALONE MODE] STARTED ====="
+    Write-Log "===== WATCH-UNINSTALL v2.1 [STANDALONE MODE] STARTED ====="
     Write-Log "App         : $appName $appVersion"
     Write-Log "Uninstaller : $UninstallerPath"
     Write-Log "Arguments   : $(if ($Arguments) { $Arguments } else { '(none)' })"
@@ -989,9 +1059,15 @@ if ($modeChoice -eq 'A') {
     $filesRemoved   = @($filesBefore | Where-Object { $filesAfter -notcontains $_ })
     $filesRemaining = @($filesBefore | Where-Object { $filesAfter -contains $_ })
 
+    # Registry remnant scan -- searches hives for any key or value still
+    # referencing the app name after the uninstaller ran
+    Write-Host "  Scanning registry for remnants of '$appName'..." -ForegroundColor DarkGray
+    $regRemnants = @(Search-RegistryRemnants -SearchTerm $appName)
+    Write-Host "  Registry remnant scan complete: $($regRemnants.Count) match(es) found." -ForegroundColor DarkGray
+
     Write-Log "After snapshot: $($filesAfter.Count) files, $($regAfter.Count) reg keys"
     Write-Log "Files removed: $($filesRemoved.Count)  |  Files remaining: $($filesRemaining.Count)"
-    Write-Log "Reg removed: $($regRemoved.Count)"
+    Write-Log "Reg removed: $($regRemoved.Count)  |  Registry remnants found: $($regRemnants.Count)"
 
     $exitMeaning = Get-ExitMeaning -Code $exitCode
     $codeColor   = if ($exitCode -in @(0, 3010, 1614, 1641)) { 'Green' } else { 'Red' }
@@ -1026,6 +1102,7 @@ if ($modeChoice -eq 'A') {
         RegistryKeysWatched         = $regBefore.Count
         RegistryKeysRemoved         = @($regRemoved)
         RegistryKeysRemaining       = @($regRemaining)
+        RegistryRemnants            = @($regRemnants)
     }
 
     try {
@@ -1085,9 +1162,31 @@ if ($modeChoice -eq 'A') {
         Write-ReportItem 'OK' "No app-related registry keys remain." 'Green'
     }
 } elseif ($modeChoice -eq 'C') {
-    Write-ReportSection "REGISTRY  --  KEYS REMOVED  ($($regRemoved.Count))"
-    Write-ReportItem '>' "Registry keys removed by the uninstaller: $($regRemoved.Count)" 'White'
-    Write-ReportSubItem "Run in JSON or Standalone mode for a full before/after registry comparison." 'DarkGray'
+    Write-ReportSection "REGISTRY  --  KEYS REMOVED BY UNINSTALLER  ($($regRemoved.Count))"
+    if ($regRemoved.Count -gt 0) {
+        foreach ($key in $regRemoved) { Write-ReportItem '[REM]' $key 'Green' }
+    } else {
+        Write-ReportItem '!' "No registry keys were removed from uninstall hives." 'Yellow'
+    }
+
+    Write-ReportSection "REGISTRY  --  REMNANT SCAN  ($($regRemnants.Count) match(es) for '$appName')"
+    if ($regRemnants.Count -gt 0) {
+        $regRemnants | Group-Object -Property RegistryPath | ForEach-Object {
+            Write-ReportItem '[LEFT]' ($_.Name -replace '^HKEY_LOCAL_MACHINE','HKLM:' -replace '^HKEY_CURRENT_USER','HKCU:') 'Red'
+            $_.Group | ForEach-Object {
+                if ($_.MatchType -eq 'Key name') {
+                    Write-ReportSubItem "(key path matches app name)" 'Yellow'
+                } else {
+                    Write-ReportSubItem $_.MatchDetail 'Yellow'
+                }
+            }
+            Write-Host ""
+        }
+        Write-ReportSubItem "These registry entries still reference '$appName' after uninstall." 'Yellow'
+        Write-ReportSubItem "They may need manual cleanup or can be added to the uninstall script." 'DarkGray'
+    } else {
+        Write-ReportItem 'OK' "No registry remnants found matching '$appName'." 'Green'
+    }
 }
 
 Write-ReportSection "FILES  --  REMOVED  ($($filesRemoved.Count))"
@@ -1134,6 +1233,9 @@ Write-ReportItem '>' "Files Removed   : $($filesRemoved.Count)" $(if ($filesRema
 Write-ReportItem '>' "Files Remaining : $($filesRemaining.Count)" $(if ($filesRemaining.Count -gt 0) { 'Red' } else { 'Green' })
 Write-ReportItem '>' "Reg Removed     : $($regRemoved.Count)" $(if ($regRemaining.Count -eq 0) { 'Green' } else { 'Yellow' })
 Write-ReportItem '>' "Reg Remaining   : $($regRemaining.Count)" $(if ($regRemaining.Count -gt 0) { 'Red' } else { 'Green' })
+if ($modeChoice -eq 'C') {
+    Write-ReportItem '>' "Reg Remnants    : $($regRemnants.Count)  (entries still referencing '$appName')" $(if ($regRemnants.Count -gt 0) { 'Red' } else { 'Green' })
+}
 Write-ReportItem '>' "Watch data file : $watchUninstallFile" 'DarkGray'
 Write-ReportItem '>' "Log saved to    : $script:LogPath" 'DarkGray'
 
@@ -1172,7 +1274,7 @@ if ($saveChoice -match '^[Yy]') {
         $savePath    = $saveDialog.FileName
         $reportLines = [System.Collections.Generic.List[string]]::new()
 
-        $reportLines.Add("WATCH-UNINSTALL v2.0 [$modeLabel] - UNINSTALL REPORT")
+        $reportLines.Add("WATCH-UNINSTALL v2.1 [$modeLabel] - UNINSTALL REPORT")
         $reportLines.Add("Generated        : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')")
         $reportLines.Add("App              : $appName$(if ($appVersion) { " v$appVersion" })")
         $reportLines.Add("Uninstaller      : $UninstallerPath")
@@ -1193,6 +1295,22 @@ if ($saveChoice -match '^[Yy]') {
         if ($regRemaining.Count -gt 0) { foreach ($k in $regRemaining) { $reportLines.Add("  [LEFT] $k") } }
         else { $reportLines.Add("  (all clean)") }
         $reportLines.Add("")
+        # Mode C: include remnant scan in text report
+        if ($modeChoice -eq 'C') {
+            $reportLines.Add("REGISTRY REMNANT SCAN -- entries still referencing '$appName'  ($($regRemnants.Count))")
+            $reportLines.Add(('-' * 64))
+            if ($regRemnants.Count -gt 0) {
+                $regRemnants | Group-Object -Property RegistryPath | ForEach-Object {
+                    $reportLines.Add("  [LEFT] $($_.Name)")
+                    $_.Group | ForEach-Object {
+                        if ($_.MatchType -eq 'Key name') { $reportLines.Add("         (key path matches app name)") }
+                        else { $reportLines.Add("         $($_.MatchDetail)") }
+                    }
+                    $reportLines.Add("")
+                }
+            } else { $reportLines.Add("  (no remnants found)") }
+            $reportLines.Add("")
+        }
         $reportLines.Add("FILES REMOVED  ($($filesRemoved.Count))")
         $reportLines.Add(('-' * 64))
         if ($filesRemoved.Count -gt 0) {
@@ -1222,6 +1340,9 @@ if ($saveChoice -match '^[Yy]') {
         $reportLines.Add("  Files Remaining : $($filesRemaining.Count)")
         $reportLines.Add("  Reg Removed     : $($regRemoved.Count)")
         $reportLines.Add("  Reg Remaining   : $($regRemaining.Count)")
+        if ($modeChoice -eq 'C') {
+            $reportLines.Add("  Reg Remnants    : $($regRemnants.Count)  (entries still referencing '$appName')")
+        }
         $reportLines.Add("  Watch data file : $watchUninstallFile")
         $reportLines.Add("  IME Log         : $script:LogPath")
 
