@@ -24,8 +24,16 @@
 # Pair with: Watch-Install.ps1 (v1.6+), Compare-WatchReports.ps1
 #
 # Author   : [CHANGE ME] - Your Name / Team Name
-# Version  : 2.0
+# Version  : 2.1
 # Changelog:
+#   2.1 - Added Mode C (Direct string). User pastes the full uninstall command
+#         exactly as they know it (e.g. setup.exe /s /f1"path\uninstall.iss").
+#         Exe and args are parsed out automatically. User optionally specifies
+#         folders to watch; defaults to Program Files + ProgramData if none
+#         given. Before/after registry and filesystem snapshots wrap the run.
+#         Registry remaining section skipped in Mode C report (no app context
+#         to filter against). Mode label updated throughout for all three modes.
+#
 #   2.0 - Added standalone mode (Mode B). No Watch_Installer JSON required.
 #         Reads installed apps from registry (same source as Add/Remove Programs),
 #         lets user filter/select by name, takes before snapshots of registry
@@ -79,7 +87,7 @@ function Show-Banner {
     Clear-Host
     Write-Host ""
     Write-Host "  ╔══════════════════════════════════════════════════════════╗" -ForegroundColor Magenta
-    Write-Host "  ║         WATCH-UNINSTALL  v2.0  -- Intune Packager        ║" -ForegroundColor Magenta
+    Write-Host "  ║         WATCH-UNINSTALL  v2.1  -- Intune Packager        ║" -ForegroundColor Magenta
     Write-Host "  ║  Monitors what the uninstaller removes vs what it leaves  ║" -ForegroundColor Magenta
     Write-Host "  ╚══════════════════════════════════════════════════════════╝" -ForegroundColor Magenta
     Write-Host ""
@@ -344,7 +352,12 @@ Write-Host "                          list (same as Add/Remove Programs), take b
 Write-Host "                          snapshots, and see exactly what the uninstaller" -ForegroundColor DarkGray
 Write-Host "                          cleaned up vs what it left behind." -ForegroundColor DarkGray
 Write-Host ""
-Write-Host "  Choice [A/B, default A] > " -ForegroundColor White -NoNewline
+Write-Host "    [C]  Direct string  -- You already know the full uninstall command." -ForegroundColor Gray
+Write-Host "                          Paste it in, optionally specify folders to watch," -ForegroundColor DarkGray
+Write-Host "                          and get before/after snapshots around the run." -ForegroundColor DarkGray
+Write-Host "                          e.g.  setup.exe /s /f1`"C:\uninstall.iss`"" -ForegroundColor DarkGray
+Write-Host ""
+Write-Host "  Choice [A/B/C, default A] > " -ForegroundColor White -NoNewline
 $modeChoice = (Read-Host).Trim().ToUpper()
 if ([string]::IsNullOrEmpty($modeChoice)) { $modeChoice = 'A' }
 
@@ -837,6 +850,196 @@ if ($modeChoice -eq 'A') {
     $filesBefore    = $null  # not needed below
     $uninstallerName = Split-Path $UninstallerPath -Leaf
 
+# ==============================================================================
+# ── MODE C: DIRECT STRING ─────────────────────────────────────────────────────
+# ==============================================================================
+} elseif ($modeChoice -eq 'C') {
+
+    Write-Host "  STEP 1 -- Enter your full uninstall command" -ForegroundColor White
+    Write-Host "  Paste the complete command exactly as you would run it." -ForegroundColor DarkGray
+    Write-Host "  Examples:" -ForegroundColor DarkGray
+    Write-Host "    setup.exe /s /f1`"C:\Temp\uninstall.iss`"" -ForegroundColor Gray
+    Write-Host "    `"C:\Program Files\App\uninstall.exe`" /r /debuglog`"C:\Logs\uninstall.log`"" -ForegroundColor Gray
+    Write-Host "    MsiExec.exe /X{GUID} /qn /norestart" -ForegroundColor Gray
+    Write-Host ""
+    Write-Host "  Command > " -ForegroundColor White -NoNewline
+    $rawCommand = (Read-Host).Trim()
+
+    if ([string]::IsNullOrWhiteSpace($rawCommand)) {
+        Write-Host "  No command entered. Exiting." -ForegroundColor Red
+        exit 1
+    }
+
+    # Parse exe + args out of the raw string
+    if ($rawCommand -match '^"([^"]+)"\s*(.*)$') {
+        $UninstallerPath = $Matches[1]
+        $Arguments       = $Matches[2].Trim()
+    } elseif ($rawCommand -match '^(\S+)\s+(.+)$') {
+        $UninstallerPath = $Matches[1]
+        $Arguments       = $Matches[2].Trim()
+    } else {
+        $UninstallerPath = $rawCommand
+        $Arguments       = ''
+    }
+
+    # Validate the exe exists
+    if (-not (Test-Path $UninstallerPath -ErrorAction SilentlyContinue)) {
+        Write-Host ""
+        Write-Host "  WARNING: Executable not found at: $UninstallerPath" -ForegroundColor Yellow
+        Write-Host "  This may still work if the path is resolved at runtime (e.g. msiexec)." -ForegroundColor DarkGray
+    } else {
+        Write-Host "  OK  Exe found: $UninstallerPath" -ForegroundColor Green
+    }
+    if ($Arguments) { Write-Host "      Args : $Arguments" -ForegroundColor DarkGray }
+    Write-Host ""
+
+    # -- App label (used in report and filenames) ------------------------------
+    Write-Host "  STEP 2 -- App name (for the report and output filename)" -ForegroundColor White
+    Write-Host "  Enter a short name for the app being uninstalled, or press Enter to use" -ForegroundColor DarkGray
+    Write-Host "  the executable filename." -ForegroundColor DarkGray
+    Write-Host ""
+    $uninstallerName = Split-Path $UninstallerPath -Leaf
+    $defaultLabel    = [System.IO.Path]::GetFileNameWithoutExtension($uninstallerName)
+    Write-Host "  App name [default: $defaultLabel] > " -ForegroundColor White -NoNewline
+    $appNameInput = (Read-Host).Trim()
+    $appName    = if ($appNameInput) { $appNameInput } else { $defaultLabel }
+    $appVersion = ''
+    $safeAppName = ($appName -replace '[^a-zA-Z0-9]+', '_').Trim('_')
+
+    Write-Host ""
+
+    # -- Watch roots -----------------------------------------------------------
+    Write-Host "  STEP 3 -- Folders to watch (optional but recommended)" -ForegroundColor White
+    Write-Host "  Enter the app's install folder so the script knows what to snapshot." -ForegroundColor DarkGray
+    Write-Host "  You can enter multiple paths -- press Enter with a blank line when done." -ForegroundColor DarkGray
+    Write-Host "  Press Enter immediately to watch Program Files + ProgramData (broader)." -ForegroundColor DarkGray
+    Write-Host ""
+
+    $manualRoots = [System.Collections.Generic.List[string]]::new()
+    $pathNum = 1
+    do {
+        Write-Host "  Folder $pathNum (or Enter to finish) > " -ForegroundColor White -NoNewline
+        $pathInput = (Read-Host).Trim()
+        if ([string]::IsNullOrWhiteSpace($pathInput)) { break }
+        if (Test-Path $pathInput -ErrorAction SilentlyContinue) {
+            $manualRoots.Add($pathInput.TrimEnd('\'))
+            Write-Host "  OK  Added: $pathInput" -ForegroundColor Green
+        } else {
+            Write-Host "  WARNING: Path not found, skipping: $pathInput" -ForegroundColor Yellow
+        }
+        $pathNum++
+    } while ($true)
+
+    $watchRoots = if ($manualRoots.Count -gt 0) {
+        $manualRoots
+    } else {
+        Write-Host "  No folders entered -- watching Program Files, Program Files (x86), and ProgramData." -ForegroundColor DarkGray
+        @($env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:ProgramData)
+    }
+
+    Write-Host ""
+
+    # -- Before snapshot -------------------------------------------------------
+    Write-Host "  Taking before snapshot..." -ForegroundColor DarkGray
+    Write-Host "  Watching: $($watchRoots -join ', ')" -ForegroundColor DarkGray
+
+    $regBefore      = Get-RegistrySnapshot
+    $regBeforePaths = @($regBefore | ForEach-Object { $_.Path })
+
+    Write-Host "  Snapshotting filesystem (this may take a moment)..." -ForegroundColor DarkGray
+    $filesBefore = Get-FilesystemSnapshot -Roots $watchRoots
+    Write-Host "  Snapshot: $($filesBefore.Count) files, $($regBefore.Count) registry keys" -ForegroundColor DarkGray
+    Write-Host ""
+
+    # -- Confirm ---------------------------------------------------------------
+    Write-Host "  ┌──────────────────────────────────────────────────────────┐" -ForegroundColor DarkMagenta
+    Write-Host ("  │  {0,-56}│" -f 'READY TO UNINSTALL  [DIRECT STRING MODE]') -ForegroundColor DarkMagenta
+    Write-Host ("  │  {0,-56}│" -f '')                                          -ForegroundColor DarkMagenta
+    Write-Host ("  │  {0,-56}│" -f "App        : $($appName -replace '(.{42}).+','$1...')") -ForegroundColor White
+    Write-Host ("  │  {0,-56}│" -f "Uninstaller: $($uninstallerName -replace '(.{42}).+','$1...')") -ForegroundColor White
+    Write-Host ("  │  {0,-56}│" -f "Arguments  : $(if ($Arguments) { ($Arguments -replace '(.{42}).+','$1...') } else { '(none)' })") -ForegroundColor White
+    Write-Host ("  │  {0,-56}│" -f "Watching   : $($watchRoots.Count) folder(s), $($filesBefore.Count) files") -ForegroundColor White
+    Write-Host "  └──────────────────────────────────────────────────────────┘" -ForegroundColor DarkMagenta
+    Write-Host ""
+    Write-Host "  Press Enter to start  |  Ctrl+C to cancel" -ForegroundColor DarkGray
+    Read-Host | Out-Null
+
+    Write-Log "===== WATCH-UNINSTALL v2.1 [DIRECT STRING MODE] STARTED ====="
+    Write-Log "App         : $appName"
+    Write-Log "Command     : $rawCommand"
+    Write-Log "Uninstaller : $UninstallerPath"
+    Write-Log "Arguments   : $(if ($Arguments) { $Arguments } else { '(none)' })"
+    Write-Log "Watch roots : $($watchRoots -join ', ')"
+    Write-Log "Snapshot    : $($filesBefore.Count) files, $($regBefore.Count) reg keys"
+
+    # -- Run uninstaller -------------------------------------------------------
+    $exitCode = Invoke-Uninstaller -UninstallerPath $UninstallerPath -Arguments $Arguments
+
+    # -- Post-uninstall snapshot and diff --------------------------------------
+    Write-Host ""
+    Write-Host "  Taking after snapshot and comparing..." -ForegroundColor DarkGray
+
+    $regAfter      = Get-RegistrySnapshot
+    $regAfterPaths = @($regAfter | ForEach-Object { $_.Path })
+    $filesAfter    = Get-FilesystemSnapshot -Roots $watchRoots
+
+    $regRemoved   = @($regBeforePaths | Where-Object { $regAfterPaths -notcontains $_ })
+    $regRemaining = @()   # Can't know which remaining keys are app-related without registry data
+
+    $filesRemoved   = @($filesBefore | Where-Object { $filesAfter -notcontains $_ })
+    $filesRemaining = @($filesBefore | Where-Object { $filesAfter -contains $_ })
+
+    Write-Log "After snapshot: $($filesAfter.Count) files, $($regAfter.Count) reg keys"
+    Write-Log "Files removed: $($filesRemoved.Count)  |  Files remaining: $($filesRemaining.Count)"
+    Write-Log "Reg removed: $($regRemoved.Count)"
+
+    $exitMeaning = Get-ExitMeaning -Code $exitCode
+    $codeColor   = if ($exitCode -in @(0, 3010, 1614, 1641)) { 'Green' } else { 'Red' }
+
+    # -- Auto-save JSON --------------------------------------------------------
+    $watchUninstallDir  = "$env:USERPROFILE\Downloads"
+    $watchUninstallFile = Join-Path $watchUninstallDir "Watch_Uninstaller_${safeAppName}.json"
+
+    $uninstallRecord = [ordered]@{
+        Type        = 'Uninstall'
+        GeneratedAt = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+        Meta = [ordered]@{
+            ScriptVersion   = '2.0'
+            Mode            = 'Direct'
+            AppName         = $safeAppName
+            RawCommand      = $rawCommand
+            UninstallerPath = $UninstallerPath
+            UninstallerFile = $uninstallerName
+            Arguments       = $Arguments
+            ExitCode        = $exitCode
+            ExitMeaning     = $exitMeaning
+            IMELog          = $script:LogPath
+            WatchRoots      = $watchRoots
+        }
+        AppInfo = [ordered]@{
+            DisplayName    = $appName
+            DisplayVersion = ''
+        }
+        FilesWatchedBeforeUninstall = $filesBefore.Count
+        FilesRemoved                = @($filesRemoved)
+        FilesRemaining              = @($filesRemaining)
+        RegistryKeysWatched         = $regBefore.Count
+        RegistryKeysRemoved         = @($regRemoved)
+        RegistryKeysRemaining       = @($regRemaining)
+    }
+
+    try {
+        $uninstallRecord | ConvertTo-Json -Depth 10 |
+            Set-Content -Path $watchUninstallFile -Encoding UTF8 -ErrorAction Stop
+        Write-Log "Watch_Uninstaller data saved to: $watchUninstallFile"
+    }
+    catch {
+        Write-Log "Failed to save Watch_Uninstaller JSON: $_" 'WARN'
+        $watchUninstallFile = "(save failed)"
+    }
+
+    $filesBefore = $null  # not needed in shared report
+
 } else {
     Write-Host "  Invalid choice. Exiting." -ForegroundColor Red
     exit 1
@@ -846,7 +1049,11 @@ if ($modeChoice -eq 'A') {
 # REGION: SHARED REPORT (both modes)
 # ==============================================================================
 Show-Banner
-$modeLabel = if ($modeChoice -eq 'A') { 'JSON MODE' } else { 'STANDALONE MODE' }
+$modeLabel = switch ($modeChoice) {
+    'A' { 'JSON MODE' }
+    'B' { 'STANDALONE MODE' }
+    'C' { 'DIRECT STRING MODE' }
+}
 Write-ReportHeader "UNINSTALL REPORT  [$modeLabel]  --  $appName $(if ($appVersion) { "v$appVersion" })"
 
 Write-ReportSection "EXIT CODE"
@@ -869,7 +1076,7 @@ if ($modeChoice -eq 'A') {
     } else {
         Write-ReportItem 'OK' "All tracked registry keys were removed." 'Green'
     }
-} else {
+} elseif ($modeChoice -eq 'B') {
     Write-ReportSection "REGISTRY  --  APP-RELATED KEYS STILL PRESENT  ($($regRemaining.Count))"
     if ($regRemaining.Count -gt 0) {
         foreach ($key in $regRemaining) { Write-ReportItem '[LEFT]' $key 'Red' }
@@ -877,6 +1084,10 @@ if ($modeChoice -eq 'A') {
     } else {
         Write-ReportItem 'OK' "No app-related registry keys remain." 'Green'
     }
+} elseif ($modeChoice -eq 'C') {
+    Write-ReportSection "REGISTRY  --  KEYS REMOVED  ($($regRemoved.Count))"
+    Write-ReportItem '>' "Registry keys removed by the uninstaller: $($regRemoved.Count)" 'White'
+    Write-ReportSubItem "Run in JSON or Standalone mode for a full before/after registry comparison." 'DarkGray'
 }
 
 Write-ReportSection "FILES  --  REMOVED  ($($filesRemoved.Count))"
@@ -890,8 +1101,11 @@ if ($filesRemoved.Count -gt 0) {
     Write-ReportItem '!' "No tracked files were removed." 'Yellow'
 }
 
-$remainLabel = if ($modeChoice -eq 'A') { "FILES  --  REMAINING / NOT CLEANED UP  ($($filesRemaining.Count))" } `
-               else { "FILES  --  STILL PRESENT IN WATCHED FOLDERS  ($($filesRemaining.Count))" }
+$remainLabel = switch ($modeChoice) {
+    'A' { "FILES  --  REMAINING / NOT CLEANED UP  ($($filesRemaining.Count))" }
+    'B' { "FILES  --  STILL PRESENT IN WATCHED FOLDERS  ($($filesRemaining.Count))" }
+    'C' { "FILES  --  STILL PRESENT IN WATCHED FOLDERS  ($($filesRemaining.Count))" }
+}
 Write-ReportSection $remainLabel
 if ($filesRemaining.Count -gt 0) {
     $filesRemaining | Group-Object -Property { Split-Path $_ -Parent } | ForEach-Object {
